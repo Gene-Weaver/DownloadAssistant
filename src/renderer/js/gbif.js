@@ -42,11 +42,17 @@
     const ct = (document.contentType || '').toLowerCase();
     if (ct.indexOf('image/') === 0) return { state: 'image', ct };
     const t = (document.title || '').toLowerCase();
-    const html = (document.documentElement ? document.documentElement.innerHTML : '').slice(0, 6000);
-    const interactive = !!document.querySelector('iframe[src*="challenges.cloudflare.com"], .cf-turnstile, #challenge-stage, #cf-turnstile')
-      || /turnstile|managed challenge|verify you are human|needs to review the security/i.test(html);
-    const challenge = /just a moment|attention required|checking your browser|cf-browser-verification/i.test(t)
-      || /__cf_chl|cf_chl_opt|challenge-platform|cf-challenge/i.test(html);
+    const html = (document.documentElement ? document.documentElement.innerHTML : '').slice(0, 8000);
+    // INTERACTIVE = a Turnstile widget that needs a human click (the mnhn case).
+    // The challenge-stage / "just a moment" markers are used by the NON-interactive
+    // JS challenge too, so they must NOT count as interactive.
+    const interactive = !!document.querySelector('iframe[src*="challenges.cloudflare.com"], .cf-turnstile, #cf-turnstile')
+      || /cf-turnstile|managed challenge/i.test(html);
+    // CHALLENGE = a non-interactive "just a moment" JS challenge that auto-solves if
+    // the guest is allowed to run it (the sweetgum case).
+    const challenge = !!document.querySelector('#challenge-stage, #challenge-form, #trk_jschal_js')
+      || /just a moment|attention required|checking your browser|cf-browser-verification/i.test(t)
+      || /__cf_chl|cf_chl_opt|challenge-platform|cf-challenge|jschal/i.test(html);
     if (interactive) return { state: 'interactive', ct };
     if (challenge) return { state: 'challenge', ct };
     return { state: 'html', ct };
@@ -125,47 +131,63 @@
     return new Promise((resolve, reject) => {
       const fw = document.createElement('webview');
       fw.setAttribute('partition', 'persist:gbif');
+      // Do NOT throttle the guest's timers: Cloudflare's non-interactive JS
+      // challenge must actually run to mint cf_clearance, and a throttled 2px
+      // offscreen guest never finishes it — which is exactly why sweetgum "never
+      // opens" in the webview yet loads instantly in a real Chrome tab.
+      fw.setAttribute('webpreferences', 'backgroundThrottling=no');
       if (opts.userAgent) fw.setAttribute('useragent', opts.userAgent);
-      fw.className = 'gbif-fetch-view';
-      let settled = false;
+      // detectCf guests get a real (still offscreen) size so the challenge renders.
+      fw.className = opts.detectCf ? 'gbif-fetch-view cf' : 'gbif-fetch-view';
+      const TIMEOUT = opts.detectCf ? 24000 : 60000;
+      let settled = false; let poll = null;
       const finish = (fn, arg) => {
         if (settled) return; settled = true;
-        clearTimeout(timer);
+        clearTimeout(timer); if (poll) { clearInterval(poll); poll = null; }
         pendingDownloads.delete(imageUrl);
         try { fw.remove(); } catch (_) {}
         fn(arg);
       };
-      const timer = setTimeout(() => finish(reject, new Error('Timed out downloading the image.')), 60000);
+      const timer = setTimeout(() => {
+        // In CF mode a timeout means the (non-interactive) challenge never cleared;
+        // surface it as a CF gate so the caller can escalate to a human solve.
+        if (opts.detectCf) { const e = new Error('cloudflare-timeout'); e.cf = true; finish(reject, e); }
+        else finish(reject, new Error('Timed out downloading the image.'));
+      }, TIMEOUT);
 
       pendingDownloads.set(imageUrl, (dataUrl) => {
         if (dataUrl) finish(resolve, dataUrl);
         else finish(reject, new Error('The image could not be downloaded.'));
       });
 
-      fw.addEventListener('did-finish-load', async () => {
-        try {
-          if (opts.detectCf) {
-            // Peek for a Cloudflare wall before trying to read bytes. If gated, tell
-            // the caller (which routes to the one-time human solve) instead of
-            // burning the other UA tiers (which just re-trip the challenge).
-            let probe = null;
-            try { probe = await fw.executeJavaScript(CF_PROBE, true); } catch (_) { /* fall through */ }
-            if (probe && (probe.state === 'interactive' || probe.state === 'challenge')) {
-              const e = new Error('cloudflare-' + probe.state);
-              e.cf = true; e.interactive = probe.state === 'interactive';
-              finish(reject, e); return;
-            }
-          }
-          const dataUrl = await fw.executeJavaScript(FETCH_SNIPPET, true);
-          finish(resolve, dataUrl);
-        } catch (e) {
-          finish(reject, new Error('Could not read a valid image (' + (e && e.message || e) + ').'));
-        }
+      const readImage = async () => {
+        try { const dataUrl = await fw.executeJavaScript(FETCH_SNIPPET, true); finish(resolve, dataUrl); }
+        catch (e) { finish(reject, new Error('Could not read a valid image (' + (e && e.message || e) + ').')); }
+      };
+
+      // detectCf: classify image vs non-interactive challenge (wait for auto-solve)
+      // vs interactive Turnstile (needs the one-time human solve). Runs on load and
+      // on a 700ms poll (CF often transitions via history API with no nav event).
+      const probeCf = async () => {
+        if (settled) return;
+        let p = null;
+        try { p = await fw.executeJavaScript(CF_PROBE, true); } catch (_) { return; }
+        if (!p || settled) return;
+        if (p.state === 'image' || p.state === 'html') { if (poll) { clearInterval(poll); poll = null; } readImage(); return; }
+        if (p.state === 'interactive') { const e = new Error('cloudflare-interactive'); e.cf = true; e.interactive = true; finish(reject, e); return; }
+        // 'challenge' → keep polling; the guest runs CF's JS and reloads to the image.
+      };
+
+      fw.addEventListener('did-finish-load', () => {
+        if (opts.detectCf) { probeCf(); if (!poll) poll = setInterval(probeCf, 700); }
+        else readImage();
       });
+      fw.addEventListener('did-navigate', () => { if (opts.detectCf) probeCf(); });
       fw.addEventListener('did-fail-load', (e) => {
-        // errorCode -3 (ERR_ABORTED) == navigation turned into a download; wait
-        // for the capture event. Other main-frame errors are real failures.
-        if (e.isMainFrame && e.errorCode !== -3) {
+        // errorCode -3 (ERR_ABORTED) == navigation turned into a download; wait for
+        // the capture event. In CF mode, other main-frame errors during the redirect
+        // dance are transient — let the poll/timeout govern instead of failing hard.
+        if (e.isMainFrame && e.errorCode !== -3 && !opts.detectCf) {
           finish(reject, new Error('The image failed to load in the browser (code ' + e.errorCode + ').'));
         }
       });

@@ -315,6 +315,9 @@ html, body {
   left: -9999px; top: -9999px;
   opacity: 0; pointer-events: none;
 }
+/* Cloudflare-detect guests need a real viewport (still offscreen) so the challenge
+   renders + its JS runs to completion; a 2px guest can't auto-solve. */
+.gbif-fetch-view.cf { width: 480px; height: 600px; opacity: 0.02; }
 
 /* ---- progress ---- */
 .gbif-progress {

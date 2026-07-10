@@ -29,6 +29,8 @@ const POLL_MS = 20000;
 const DRAIN_GLOBAL = 16;   // concurrent direct fetches (worker board shows each)
 const DRAIN_PER_HOST = 2;  // per institution host (be polite)
 const RATE_COOLDOWN_MS = 30000; // after a 429, rest this host this long before retrying
+const UNREACHABLE_STRIKES = 3;       // consecutive connect-timeouts before we rest a host
+const UNREACHABLE_COOLDOWN_MS = 300000; // 5 min — stop burning ~25s/row on a dead host (arctos)
 
 function herbCodeOf(occ) { try { return generateImageFilename(occ, null).herbCode; } catch (_) { return ''; } }
 const EXTRACT = ['occurrence.txt', 'multimedia.txt', 'verbatim.txt', 'citations.txt', 'rights.txt', 'metadata.xml', 'meta.xml'];
@@ -265,6 +267,7 @@ async function drainPass(parentDir, key, job) {
   // 1 concurrent (sensitive) and rested (cooldown) so we stop tripping the limit.
   if (!job.hostCooldown) job.hostCooldown = new Map();
   if (!job.hostSensitive) job.hostSensitive = new Set();
+  if (!job.hostTimeouts) job.hostTimeouts = new Map();
   let buffer = db.nextQueueBatch(dbFile, { key, status: 'pending', limit: 800 });
   let lastPush = 0;
 
@@ -311,6 +314,7 @@ async function drainPass(parentDir, key, job) {
         await downloadService.saveOne({ parentDir, occ, publisher: null, imageBuffer: buf, imageUrl: row.image_url });
         db.setQueueOutcome(dbFile, row.gbif_id, { status: 'done', method: 'direct', http_status: 200 });
         db.logFetch(dbFile, { gbif_id: row.gbif_id, host: row.host, method: 'direct', outcome: 'success', http_status: 200 });
+        job.hostTimeouts.delete(row.host); // host is alive — reset its strike count
         ok = true;
       } catch (e) {
         db.logFetch(dbFile, { gbif_id: row.gbif_id, host: row.host, method: 'direct', outcome: e.outcome || 'error', http_status: e.status, message: e.message });
@@ -323,7 +327,16 @@ async function drainPass(parentDir, key, job) {
           db.setQueueStatus(dbFile, row.gbif_id, 'pending');
         } else if (kind === 'blocked') db.setQueueOutcome(dbFile, row.gbif_id, { status: 'blocked', http_status: e.status, error: e.message }); // → webview drain
         else if (kind === 'broken') db.setQueueOutcome(dbFile, row.gbif_id, { status: 'broken', method: 'direct', http_status: e.status, error: e.message }); // dead link — never retry
-        else db.setQueueOutcome(dbFile, row.gbif_id, { status: 'failed', method: 'direct', http_status: e.status, error: e.message }); // transient — retry later
+        else {
+          db.setQueueOutcome(dbFile, row.gbif_id, { status: 'failed', method: 'direct', http_status: e.status, error: e.message }); // transient — retry later
+          // Host unreachable? After a few connect-timeouts in a row, rest it so we
+          // stop burning ~25s per row on a dead host (e.g. arctos.database.museum).
+          if (e.outcome === 'timeout' || e.outcome === 'error') {
+            const n = (job.hostTimeouts.get(row.host) || 0) + 1;
+            job.hostTimeouts.set(row.host, n);
+            if (n >= UNREACHABLE_STRIKES) job.hostCooldown.set(row.host, Date.now() + UNREACHABLE_COOLDOWN_MS);
+          }
+        }
       } finally {
         dec(row.host);
         job.workers[w] = { current: null, prev: { gbif_id: row.gbif_id, herbCode, ok } };
