@@ -52,8 +52,40 @@ function register(win) {
   // --- settings / save location -----------------------------------------
   ipcMain.handle('settings:get', () => {
     const pd = settings.getParentDir();
-    return { parentDir: pd, paths: pd ? paths.resolvePaths(pd) : null };
+    return {
+      parentDir: pd,
+      paths: pd ? paths.resolvePaths(pd) : null,
+      currentProject: settings.getCurrentProject(),
+      workerCount: settings.getWorkerCount(),
+    };
   });
+
+  ipcMain.handle('settings:setWorkerCount', (_e, n) => settings.setWorkerCount(n));
+
+  // --- projects (multi-location download manager) ------------------------
+  ipcMain.handle('projects:list', () => {
+    const cur = settings.getCurrentProject();
+    return settings.getProjects().map((p) => ({
+      ...p, status: downloadJobs.projectStatus(p.parentDir), current: !!(cur && cur.id === p.id),
+    }));
+  });
+  ipcMain.handle('projects:setCurrent', (_e, id) => {
+    const p = settings.setCurrentProject(id);
+    return p ? { project: p, paths: paths.resolvePaths(p.parentDir) } : null;
+  });
+  ipcMain.handle('projects:resume', async (_e, id) => {
+    const p = settings.getProjects().find((x) => x.id === id);
+    if (!p) return { ok: false };
+    await downloadJobs.resumeProject(p.parentDir);
+    return { ok: true };
+  });
+  ipcMain.handle('projects:pause', (_e, id) => {
+    const p = settings.getProjects().find((x) => x.id === id);
+    if (p) downloadJobs.pauseProject(p.parentDir);
+    return { ok: true };
+  });
+  ipcMain.handle('projects:rename', (_e, id, name) => settings.renameProject(id, name));
+  ipcMain.handle('projects:remove', (_e, id) => settings.removeProject(id));
 
   ipcMain.handle('settings:setParentDir', (_e, p) => {
     if (!p || !String(p).trim()) throw new Error('Enter a folder path.');

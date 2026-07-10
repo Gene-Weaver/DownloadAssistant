@@ -47,7 +47,8 @@ function snapshot(parentDir, key) {
   const job = jobs.get(key) || {};
   const archiveTerminal = row && ['EXTRACTED', 'DONE', 'FAILED', 'KILLED', 'CANCELLED', 'FILE_ERASED'].includes(row.status);
   const busy = !!(row && (!archiveTerminal || job.enumerating || counts.pending || counts.in_progress || counts.blocked));
-  return { ...row, counts, enumerating: !!job.enumerating, busy };
+  const paused = !!job.cancelled && (counts.pending > 0 || counts.in_progress > 0 || counts.blocked > 0);
+  return { ...row, parentDir, counts, enumerating: !!job.enumerating, busy, paused };
 }
 
 // Build the compact, saveOne-shaped occ from a live search result (same shape
@@ -228,7 +229,10 @@ async function startDrain(parentDir, key) {
   const job = jobs.get(key) || {}; job.parentDir = parentDir; job.cancelled = false; jobs.set(key, job);
   if (job.draining) return;
   job.draining = true;
-  if (!job.workers) job.workers = Array.from({ length: DRAIN_GLOBAL }, () => ({ current: null, prev: null }));
+  job.workerCount = settings.getWorkerCount(); // capture the pool size for this run
+  if (!job.workers || job.workers.length !== job.workerCount) {
+    job.workers = Array.from({ length: job.workerCount }, () => ({ current: null, prev: null }));
+  }
   const dbFile = dbFileFor(parentDir);
   db.resetInProgress(dbFile);
 
@@ -311,7 +315,7 @@ async function drainPass(parentDir, key, job) {
       }
     }
   };
-  await Promise.all(Array.from({ length: DRAIN_GLOBAL }, (_, w) => worker(w)));
+  await Promise.all(Array.from({ length: job.workerCount || DRAIN_GLOBAL }, (_, w) => worker(w)));
 }
 
 // --- renderer-driven webview drain of blocked rows ------------------------
@@ -379,31 +383,69 @@ function resume(key) {
   startDrain(parentDir, key);
 }
 
-async function resumeOnStartup() {
-  const parentDir = settings.getParentDir();
-  if (!parentDir) return;
+// Resume all of ONE project's active downloads (both tracks). Un-pauses any of
+// its jobs that were paused. Called on startup for the current project and by
+// the Projects tab's Resume button for any project.
+async function resumeProject(parentDir) {
+  if (!parentDir) return { resumed: 0 };
   const dbFile = dbFileFor(parentDir);
   let active;
-  try { active = db.getActiveDownloads(dbFile); } catch (_) { return; }
-  if (!active.length) return;
+  try { active = db.getActiveDownloads(dbFile); } catch (_) { return { resumed: 0 }; }
   db.resetInProgress(dbFile);
   for (const row of active) {
+    const existing = jobs.get(row.key);
+    if (existing) existing.cancelled = false; // un-pause
     const st = row.status;
     if (['PREPARING', 'RUNNING'].includes(st)) {
-      startPoll(parentDir, row.key); // Track A resumes
-      if (row.source_url) startImmediateEnumerate(parentDir, row.key, row.source_url); // Track B resumes
+      startPoll(parentDir, row.key);
+      if (row.source_url) startImmediateEnumerate(parentDir, row.key, row.source_url);
     } else if (['SUCCEEDED', 'DOWNLOADING_ZIP', 'PARSING'].includes(st)) {
       try {
         const s = await api.pollDownload(row.key);
         if (s.status === 'SUCCEEDED') handleSucceeded(parentDir, row.key, s);
         else if (s.status === 'FILE_ERASED') db.updateDownload(dbFile, row.key, { status: 'FILE_ERASED' });
         else startPoll(parentDir, row.key);
-      } catch (_) { /* offline; will retry next launch */ }
+      } catch (_) { /* offline; retry next launch */ }
     } else if (['EXTRACTED', 'QUEUED'].includes(st)) {
-      startDrain(parentDir, row.key); // archive done; finish the image queue
+      startDrain(parentDir, row.key);
     }
   }
-  push('gbif:jobsActive', active.map((r) => r.key));
+  if (active.length) push('gbif:jobsActive', active.map((r) => r.key));
+  return { resumed: active.length };
+}
+
+// Pause a project: stop polling + drain workers for all its jobs. Rows stay
+// pending/blocked, so it's fully resumable.
+function pauseProject(parentDir) {
+  let n = 0;
+  for (const [, job] of jobs) {
+    if (job.parentDir === parentDir) {
+      job.cancelled = true;
+      if (job.pollTimer) { clearInterval(job.pollTimer); job.pollTimer = null; }
+      n += 1;
+    }
+  }
+  return { paused: n };
+}
+
+// Read-only status for a project (works even if its jobs aren't loaded).
+function projectStatus(parentDir) {
+  const dbFile = dbFileFor(parentDir);
+  let downloads = [];
+  let imageCount = 0;
+  try { downloads = db.getActiveDownloads(dbFile); } catch (_) { /* no db yet */ }
+  try { imageCount = db.count(dbFile); } catch (_) { /* no db yet */ }
+  const all = { pending: 0, in_progress: 0, blocked: 0, done: 0, failed: 0, broken: 0, skipped: 0, total: 0 };
+  for (const d of downloads) { const c = db.queueCounts(dbFile, d.key); for (const k of Object.keys(all)) all[k] += c[k] || 0; }
+  const projJobs = [...jobs.values()].filter((j) => j.parentDir === parentDir);
+  const running = projJobs.some((j) => !j.cancelled && (j.draining || j.pollTimer || j.enumerating));
+  const hasWork = all.pending > 0 || all.in_progress > 0 || all.blocked > 0 ||
+    downloads.some((d) => !['EXTRACTED', 'DONE', 'FAILED', 'KILLED', 'CANCELLED', 'FILE_ERASED'].includes(d.status));
+  return { activeDownloads: downloads.length, counts: all, imageCount, running, paused: !running && hasWork };
+}
+
+async function resumeOnStartup() {
+  await resumeProject(settings.getParentDir());
 }
 
 function listActive() {
@@ -415,5 +457,6 @@ function listActive() {
 
 module.exports = {
   init, submit, cancel, resume, resumeOnStartup, listActive,
+  resumeProject, pauseProject, projectStatus,
   nextBlocked, saveBlocked, failBlocked,
 };

@@ -23,7 +23,15 @@
         <span class="brand-name">DOWNLOAD_ASSISTANT</span>
         <span class="cursor">▊</span>
         <span class="brand-sub">// specimen image acquisition unit</span>
-        <span id="updater-bar" class="updater-bar mono" hidden></span>
+        <span class="header-right">
+          <span class="worker-ctl" id="worker-ctl" title="Workers per download run — editable when idle/paused, locked while running">
+            <span class="wk-label">WORKERS</span>
+            <button class="wk-step" id="wk-dec" aria-label="fewer workers">−</button>
+            <span class="wk-count" id="wk-count">16</span>
+            <button class="wk-step" id="wk-inc" aria-label="more workers">+</button>
+          </span>
+          <span id="updater-bar" class="updater-bar mono" hidden></span>
+        </span>
       </div>
 
       <div class="savebar">
@@ -49,6 +57,7 @@
     <nav id="tabs" role="tablist">
       <button class="tab active" data-tab="gbif" role="tab" aria-selected="true">[ GBIF ]</button>
       <button class="tab" data-tab="viewer" role="tab" aria-selected="false">[ VIEWER ]</button>
+      <button class="tab" data-tab="projects" role="tab" aria-selected="false">[ PROJECTS ]</button>
       <button class="tab tab-soon" disabled title="More sources coming soon">[ + MORE SOON ]</button>
     </nav>
 
@@ -141,6 +150,17 @@
           </div>
         </div>
       </section>
+
+      <!-- ===== PROJECTS tab: multi-location download manager ===== -->
+      <section id="tab-projects" class="tab-panel" role="tabpanel">
+        <div class="pj-toolbar">
+          <span class="pj-title mono">▚ PROJECTS — download manager</span>
+          <div class="spacer"></div>
+          <span class="pj-hint mono">each project is a save location with its own db + downloads · resume/pause any</span>
+          <button id="pj-refresh" class="btn ghost icon-btn" title="Reload">⟳</button>
+        </div>
+        <div id="pj-list" class="pj-list"></div>
+      </section>
     </main>
   </div>
 
@@ -151,6 +171,7 @@
   <script src="js/ui.js"></script>
   <script src="js/gbif.js"></script>
   <script src="js/viewer.js"></script>
+  <script src="js/projects.js"></script>
   <script src="js/updater.js"></script>
   <script src="js/app.js"></script>
 </body>

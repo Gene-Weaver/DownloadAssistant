@@ -16,10 +16,19 @@ const invoke = (channel) => (...args) => ipcRenderer.invoke(channel, ...args);
 
 const api = {
   settings: {
-    get:          invoke('settings:get'),          // () -> { parentDir, paths }
-    setParentDir: invoke('settings:setParentDir'), // (path) -> { parentDir, paths }
-    pickDir:      invoke('settings:pickDir'),       // () -> path | null (dialog)
-    reveal:       invoke('settings:reveal'),        // () -> bool (open images/ in Finder)
+    get:            invoke('settings:get'),            // () -> { parentDir, paths, currentProject, workerCount }
+    setParentDir:   invoke('settings:setParentDir'),   // (path) -> { parentDir, paths }
+    pickDir:        invoke('settings:pickDir'),        // () -> path | null (dialog)
+    reveal:         invoke('settings:reveal'),         // () -> bool (open images/ in Finder)
+    setWorkerCount: invoke('settings:setWorkerCount'), // (n) -> clampedN
+  },
+  projects: {
+    list:       invoke('projects:list'),       // () -> [{ id,name,parentDir,status,current }]
+    setCurrent: invoke('projects:setCurrent'), // (id) -> { project, paths }
+    resume:     invoke('projects:resume'),     // (id)
+    pause:      invoke('projects:pause'),       // (id)
+    rename:     invoke('projects:rename'),      // (id, name)
+    remove:     invoke('projects:remove'),      // (id)
   },
   gbif: {
     getOccurrence:   invoke('gbif:getOccurrence'),   // (ref) -> meta (+duplicate)

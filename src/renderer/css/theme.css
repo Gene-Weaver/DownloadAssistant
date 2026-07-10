@@ -822,6 +822,84 @@ html, body {
 .jtree-val.bool { color: var(--magenta); }
 .jtree-val.null { color: var(--muted); font-style: italic; }
 
+/* ===================== header worker-count control ===================== */
+.header-right { margin-left: auto; display: flex; align-items: center; gap: 12px; }
+.header-right .updater-bar { margin-left: 0; }
+.worker-ctl {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  letter-spacing: 0.5px;
+  color: var(--green);
+  border: 1px solid var(--green-dim);
+  border-radius: 2px;
+  padding: 2px 6px;
+  background: rgba(51, 255, 102, 0.04);
+}
+.worker-ctl.locked { color: var(--muted); border-color: var(--green-line); }
+.wk-label { color: var(--cyan); }
+.worker-ctl.locked .wk-label { color: var(--muted); }
+.wk-count { min-width: 20px; text-align: center; font-weight: 700; }
+.wk-step {
+  background: transparent;
+  border: 1px solid var(--green-dim);
+  color: var(--green);
+  font-family: var(--mono);
+  font-size: 13px;
+  width: 20px; height: 18px;
+  border-radius: 2px;
+  cursor: pointer;
+  line-height: 1;
+}
+.wk-step:hover:not(:disabled) { background: rgba(51, 255, 102, 0.15); }
+.wk-step:disabled { opacity: 0.3; cursor: not-allowed; }
+
+/* ========================= PROJECTS tab ================================= */
+#tab-projects { grid-template-rows: auto 1fr; }
+.pj-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--green-line);
+}
+.pj-title { color: var(--green); letter-spacing: 1px; text-shadow: var(--glow); }
+.pj-hint { color: var(--muted); font-size: 11px; }
+.pj-list {
+  overflow: auto;
+  padding: 14px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: 12px;
+  align-content: start;
+}
+.pj-empty { color: var(--muted); padding: 24px; }
+.pj-card {
+  border: 1px solid var(--green-line);
+  border-radius: 3px;
+  padding: 12px 14px;
+  background: var(--bg-panel);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.pj-card.current { border-color: var(--green-dim); box-shadow: inset 3px 0 0 var(--green), 0 0 12px rgba(51,255,102,0.08); }
+.pj-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.pj-name { color: var(--green); font-weight: 700; letter-spacing: 0.5px; }
+.pj-cur-tag { color: var(--bg); background: var(--green); font-size: 9px; padding: 1px 5px; border-radius: 2px; letter-spacing: 1px; vertical-align: middle; }
+.pj-badge { font-family: var(--mono); font-size: 10px; letter-spacing: 1px; white-space: nowrap; }
+.pj-badge.run { color: var(--green); text-shadow: var(--glow); }
+.pj-badge.pause { color: var(--amber); }
+.pj-badge.idle { color: var(--muted); }
+.pj-loc { color: var(--muted); font-size: 11px; word-break: break-all; }
+.pj-stats { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 11px; }
+.pj-images { color: var(--green-soft); }
+.pj-active { color: var(--cyan); }
+.pj-counts { color: var(--muted); }
+.pj-actions { display: flex; gap: 6px; align-items: center; margin-top: 2px; flex-wrap: wrap; }
+.pj-cur-note { color: var(--green-dim); font-size: 11px; }
+
 /* scrollbars, terminal-style */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: #060b10; }
