@@ -144,17 +144,17 @@ function register(win) {
     const pd = settings.getParentDir();
     return pd ? downloadJobs.nextBlocked(pd, key, limit) : [];
   });
-  ipcMain.handle('gbif:saveBlocked', async (_e, key, gbifId, dataUrl) => {
+  ipcMain.handle('gbif:saveBlocked', async (_e, key, gbifId, dataUrl, method, trail) => {
     const pd = settings.getParentDir();
     if (!pd) return { ok: false };
     const buf = decodeImage(dataUrl);
-    if (!buf || !buf.length) { downloadJobs.failBlocked(pd, key, gbifId, 'no image bytes'); return { ok: false }; }
-    await downloadJobs.saveBlocked(pd, key, gbifId, buf);
+    if (!buf || !buf.length) { downloadJobs.failBlocked(pd, key, gbifId, { kind: 'failed', trail }); return { ok: false }; }
+    await downloadJobs.saveBlocked(pd, key, gbifId, buf, method, trail);
     return { ok: true };
   });
-  ipcMain.handle('gbif:failBlocked', (_e, key, gbifId, err) => {
+  ipcMain.handle('gbif:failBlocked', (_e, key, gbifId, info) => {
     const pd = settings.getParentDir();
-    if (pd) downloadJobs.failBlocked(pd, key, gbifId, err);
+    if (pd) downloadJobs.failBlocked(pd, key, gbifId, info);
     return true;
   });
 

@@ -135,15 +135,52 @@
     });
   }
 
-  // Default (Electron) UA first; retry the same image once as plain Chrome only
-  // if that fails (a host that 403s the Electron UA).
+  // A fully realistic modern-Chrome UA — the last-ditch fallback for hosts that
+  // reject both the honest Electron UA and the token-stripped "Chrome face".
+  const REALISTIC_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+
+  // Progressive UA fallback inside the webview session (each tried ONCE):
+  //   1. default (honest Electron UA)
+  //   2. CLEAN_UA — Electron/IRIS tokens stripped = plain Chrome face (fixes
+  //      hosts like ids.si.edu that 403 anything containing "Electron")
+  //   3. REALISTIC_UA — a full, current Chrome UA, for the stubborn ones
+  // Returns { dataUrl, method, trail }. On total failure throws an error carrying
+  // .kind ('broken' if every tier saw 404/410/DNS, else 'failed'), .status, and
+  // .trail — one entry per tier — so the caller can log which emulation worked
+  // (or that the link is dead). Every attempt still benefits from the
+  // attachment/save-dialog capture path for direct-download links.
+  function tierOutcome(msg) {
+    const s = String(msg || '');
+    const http = (s.match(/http (\d+)/) || [])[1];
+    const net = (s.match(/code (-?\d+)/) || [])[1];
+    const dns = net === '-105' || net === '-137'; // NAME_NOT_RESOLVED / NAME_RESOLUTION_FAILED
+    return {
+      http_status: http ? Number(http) : null,
+      dns,
+      outcome: /not-an-image/i.test(s) ? 'not_image' : (http ? 'http_error' : (dns ? 'broken' : 'error')),
+    };
+  }
   async function fetchImageBytes(imageUrl) {
-    try {
-      return await downloadViaWebview(imageUrl);
-    } catch (err) {
-      if (!CLEAN_UA || CLEAN_UA === navigator.userAgent) throw err;
-      return await downloadViaWebview(imageUrl, { userAgent: CLEAN_UA });
+    const tiers = [{ ua: null, method: 'webview-electron' }];
+    if (CLEAN_UA && CLEAN_UA !== navigator.userAgent) tiers.push({ ua: CLEAN_UA, method: 'webview-clean' });
+    if (REALISTIC_UA !== navigator.userAgent && REALISTIC_UA !== CLEAN_UA) tiers.push({ ua: REALISTIC_UA, method: 'webview-realistic' });
+    const trail = [];
+    for (const t of tiers) {
+      try {
+        const dataUrl = await downloadViaWebview(imageUrl, t.ua ? { userAgent: t.ua } : {});
+        trail.push({ method: t.method, outcome: 'success' });
+        return { dataUrl, method: t.method, trail };
+      } catch (e) {
+        const o = tierOutcome(e && e.message);
+        trail.push({ method: t.method, outcome: o.outcome, http_status: o.http_status, message: e && e.message });
+      }
     }
+    const broken = trail.length > 0 && trail.every((a) => a.http_status === 404 || a.http_status === 410 || a.outcome === 'broken');
+    const err = new Error('All webview fallbacks failed.');
+    err.kind = broken ? 'broken' : 'failed';
+    err.status = trail.map((a) => a.http_status).filter(Boolean).pop() || null;
+    err.trail = trail;
+    throw err;
   }
 
   // --- single specimen -----------------------------------------------------
@@ -161,7 +198,7 @@
       setStatus('pulling image through the browser…', 'work');
       await api.gbif.setCapture(true);
       let dataUrl;
-      try { dataUrl = await fetchImageBytes(meta.image_url); }
+      try { const r = await fetchImageBytes(meta.image_url); dataUrl = r.dataUrl; }
       finally { await api.gbif.setCapture(false); }
 
       setStatus('writing to disk + index…', 'work');
@@ -255,8 +292,8 @@
         if (i >= total) break;
         const it = items[i];
         try {
-          const dataUrl = await fetchImageBytes(it.image_url);
-          const row = await api.gbif.saveImport(it.gbif_id, dataUrl);
+          const r = await fetchImageBytes(it.image_url);
+          const row = await api.gbif.saveImport(it.gbif_id, r.dataUrl);
           if (row && row.duplicate) skip++; else ok++;
         } catch (_) { fail++; }
         completed++;
@@ -489,10 +526,10 @@
     const total = snap.total_records != null ? `${Number(snap.total_records).toLocaleString()} records` : '';
     const doi = snap.doi ? `<span class="job-doi" data-doi="${esc(snap.doi)}" title="Open DOI">DOI ${esc(snap.doi)}</span>` : '';
     const hasImages = (c.total || 0) > 0;
-    const settled = (c.done || 0) + (c.skipped || 0) + (c.failed || 0);
+    const settled = (c.done || 0) + (c.skipped || 0) + (c.failed || 0) + (c.broken || 0);
     const pct = target ? Math.min(100, Math.round((settled / target) * 100)) : null;
     const imgLine = hasImages
-      ? `<div class="job-sub mono">images ${c.done || 0}/${target}${snap.enumerating ? ' (finding more…)' : ''}${c.blocked ? ` · ${c.blocked} via browser` : ''}${c.failed ? ` · ${c.failed} failed` : ''}${c.skipped ? ` · ${c.skipped} already had` : ''}</div>`
+      ? `<div class="job-sub mono">images ${c.done || 0}/${target}${snap.enumerating ? ' (finding more…)' : ''}${c.blocked ? ` · ${c.blocked} via browser` : ''}${c.broken ? ` · ${c.broken} broken` : ''}${c.failed ? ` · ${c.failed} failed` : ''}${c.skipped ? ` · ${c.skipped} already had` : ''}</div>`
       : (snap.enumerating ? '<div class="job-sub mono">finding images…</div>' : '');
     const done = snap.busy === false;
     el.innerHTML = `
@@ -509,18 +546,25 @@
     if (doiEl) doiEl.addEventListener('click', () => { try { window.open(`https://doi.org/${snap.doi}`); } catch (_) {} });
   }
 
-  // Drain rows a host bot-blocked (tier-2) through the webview session.
+  // Drain rows a host bot-blocked (tiers 2–4) through the webview session. Rows
+  // come back domain-interleaved (host_seq) and are processed at low concurrency
+  // — these are already-touchy hosts, so be gentle. Reports the winning UA (or
+  // the full failure trail) back to main for the fetch_log.
   async function startBlockedDrain(key) {
     if (state.job.draining) return;
     state.job.draining = true;
     await api.gbif.setCapture(true);
     try {
       while (true) {
-        const batch = await api.gbif.nextBlocked(key, 8);
+        const batch = await api.gbif.nextBlocked(key, 6);
         if (!batch || !batch.length) break;
         await Promise.all(batch.map(async (it) => {
-          try { const dataUrl = await fetchImageBytes(it.image_url); await api.gbif.saveBlocked(key, it.gbif_id, dataUrl); }
-          catch (_) { await api.gbif.failBlocked(key, it.gbif_id, 'webview fetch failed'); }
+          try {
+            const r = await fetchImageBytes(it.image_url);
+            await api.gbif.saveBlocked(key, it.gbif_id, r.dataUrl, r.method, r.trail);
+          } catch (e) {
+            await api.gbif.failBlocked(key, it.gbif_id, { kind: (e && e.kind) || 'failed', status: (e && e.status) || null, trail: (e && e.trail) || [] });
+          }
         }));
       }
     } finally { await api.gbif.setCapture(false); state.job.draining = false; }

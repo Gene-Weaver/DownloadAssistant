@@ -46,27 +46,44 @@ function ok(l, c) { console.log(`${c ? 'PASS' : 'FAIL'}  ${l}`); if (!c) process
   let counts = db.queueCounts(dbFile, KEY);
   ok(`enqueued ${counts.pending} imaged occurrences`, counts.pending > 0);
 
-  // mini drain: tier-1 direct only (no webview here)
-  let done = 0, blocked = 0, failed = 0;
-  const rows = db.nextQueueBatch(dbFile, { key: KEY, status: 'pending', limit: 100 });
-  for (const row of rows) {
+  // domain-interleaved order: consecutive rows should tend to be different hosts
+  const order = db.nextQueueBatch(dbFile, { key: KEY, status: 'pending', limit: 100 });
+  let sameAdjacent = 0;
+  for (let i = 1; i < order.length; i++) if (order[i].host === order[i - 1].host) sameAdjacent++;
+  ok(`queue interleaves domains (${sameAdjacent} same-host adjacencies of ${order.length - 1})`, order.length < 3 || sameAdjacent < order.length - 1);
+
+  // mini drain mirroring the real worker: classify + log every attempt
+  let done = 0, blocked = 0, failed = 0, broken = 0;
+  for (const row of order) {
     try {
-      const buf = await imageFetch.tryDirect(row.image_url);
+      const buf = await imageFetch.tryDirect(row.image_url); // one attempt
       const occ = JSON.parse(row.occ_json);
       const r = await downloadService.saveOne({ parentDir: tmp, occ, publisher: null, imageBuffer: buf, imageUrl: row.image_url });
-      db.setQueueStatus(dbFile, row.gbif_id, 'done'); done++;
-      if (!global._sampleFile) global._sampleFile = r.filename;
+      db.setQueueOutcome(dbFile, row.gbif_id, { status: 'done', method: 'direct', http_status: 200 });
+      db.logFetch(dbFile, { gbif_id: row.gbif_id, host: row.host, method: 'direct', outcome: 'success', http_status: 200 });
+      done++; if (!global._sampleFile) global._sampleFile = r.filename;
     } catch (e) {
-      if (e.blocked) { db.setQueueStatus(dbFile, row.gbif_id, 'blocked'); blocked++; }
-      else { db.setQueueStatus(dbFile, row.gbif_id, 'failed'); failed++; }
+      db.logFetch(dbFile, { gbif_id: row.gbif_id, host: row.host, method: 'direct', outcome: e.outcome || 'error', http_status: e.status, message: e.message });
+      const kind = e.kind || 'transient';
+      if (kind === 'blocked') { db.setQueueOutcome(dbFile, row.gbif_id, { status: 'blocked', http_status: e.status }); blocked++; }
+      else if (kind === 'broken') { db.setQueueOutcome(dbFile, row.gbif_id, { status: 'broken', method: 'direct', http_status: e.status }); broken++; }
+      else { db.setQueueOutcome(dbFile, row.gbif_id, { status: 'failed', method: 'direct', http_status: e.status }); failed++; }
     }
   }
-  console.log(`     drained: ${done} direct-downloaded, ${blocked} blocked(->webview), ${failed} failed`);
+  console.log(`     drained: ${done} direct, ${blocked} blocked(->webview), ${broken} broken, ${failed} failed`);
   ok('some images downloaded directly (headless)', done > 0);
   ok('images written to disk + indexed', db.count(dbFile) === done);
 
   counts = db.queueCounts(dbFile, KEY);
-  ok('queue counts reconcile', counts.done === done && counts.blocked === blocked);
+  ok('queue counts reconcile (incl broken)', counts.done === done && counts.blocked === blocked && counts.broken === broken && counts.failed === failed);
+
+  // failure analytics
+  const stats = db.fetchStats(dbFile);
+  ok('fetch_log populated + per-host stats', stats.byHost.length > 0 && stats.byHost.reduce((a, h) => a + h.attempts, 0) === order.length);
+  const doneRow = db.getRow ? null : null; // method recorded on the queue row
+  const sampleDone = db.open(dbFile).prepare("SELECT method FROM download_queue WHERE status='done' LIMIT 1").get();
+  ok('winning method recorded on done rows', sampleDone && sampleDone.method === 'direct');
+  console.log('     per-host stats:', JSON.stringify(stats.byHost.slice(0, 4)));
   console.log('     sample filename:', global._sampleFile, '| queue:', JSON.stringify(counts));
 
   // verify a saved image file exists

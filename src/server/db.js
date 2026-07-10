@@ -68,14 +68,32 @@ CREATE TABLE IF NOT EXISTS download_queue (
   download_key TEXT,
   image_url    TEXT,
   host         TEXT,               -- registrable-ish host, for per-host throttling
+  host_seq     INTEGER DEFAULT 0,  -- Nth item for this host; drives domain-INTERLEAVED order
   occ_json     TEXT,               -- compact occurrence metadata (built from occurrence.txt)
-  status       TEXT NOT NULL DEFAULT 'pending', -- pending|in_progress|blocked|done|failed|skipped
+  status       TEXT NOT NULL DEFAULT 'pending', -- pending|in_progress|blocked|done|failed|broken|skipped
+  method       TEXT,               -- fetch tier that settled it: direct|webview-electron|webview-clean|webview-realistic
+  http_status  INTEGER,            -- last HTTP status seen
   attempts     INTEGER NOT NULL DEFAULT 0,
   last_error   TEXT,
   updated_at   TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_dlq_status ON download_queue(status, host);
+CREATE INDEX IF NOT EXISTS idx_dlq_status ON download_queue(status, host_seq);
 CREATE INDEX IF NOT EXISTS idx_dlq_key    ON download_queue(download_key);
+
+-- Every fetch ATTEMPT (each tier), for trend analysis: which domains bot-block,
+-- which browser emulation works for which domain, which are outright broken.
+CREATE TABLE IF NOT EXISTS fetch_log (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  gbif_id     TEXT,
+  host        TEXT,
+  method      TEXT,   -- direct | webview-electron | webview-clean | webview-realistic
+  outcome     TEXT,   -- success | blocked | broken | timeout | http_error | not_image | error
+  http_status INTEGER,
+  message     TEXT,
+  ts          TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_fetchlog_host ON fetch_log(host, outcome);
+CREATE INDEX IF NOT EXISTS idx_fetchlog_gbif ON fetch_log(gbif_id);
 `;
 
 // Additive migrations for DBs created by an earlier version (CREATE TABLE IF NOT
@@ -83,6 +101,10 @@ CREATE INDEX IF NOT EXISTS idx_dlq_key    ON download_queue(download_key);
 function migrate(db) {
   const cols = db.pragma('table_info(images)').map((c) => c.name);
   if (!cols.includes('event_date')) db.exec('ALTER TABLE images ADD COLUMN event_date TEXT');
+  const dq = db.pragma('table_info(download_queue)').map((c) => c.name);
+  if (!dq.includes('host_seq')) db.exec('ALTER TABLE download_queue ADD COLUMN host_seq INTEGER DEFAULT 0');
+  if (!dq.includes('method')) db.exec('ALTER TABLE download_queue ADD COLUMN method TEXT');
+  if (!dq.includes('http_status')) db.exec('ALTER TABLE download_queue ADD COLUMN http_status INTEGER');
 }
 
 function open(dbFile) {
@@ -218,12 +240,26 @@ function getActiveDownloads(dbFile) {
 }
 
 // --- download_queue (per-image work) --------------------------------------
+// Enqueue with a per-host running index (host_seq). Ordering by (host_seq, host)
+// then INTERLEAVES domains — every host's item 0 first, then every host's item
+// 1, … — so workers pull different domains back-to-back with no runtime sorting,
+// and no single server gets a burst. Counters are seeded from existing rows so
+// Track B batches + the Track A top-up keep interleaving consistently.
 function enqueue(dbFile, rows) {
   const db = open(dbFile);
+  const counters = new Map();
+  const nextSeq = (host) => {
+    if (!counters.has(host)) counters.set(host, db.prepare('SELECT COUNT(*) AS n FROM download_queue WHERE host = ?').get(host).n);
+    const s = counters.get(host);
+    counters.set(host, s + 1);
+    return s;
+  };
   const stmt = db.prepare(`INSERT OR IGNORE INTO download_queue
-    (gbif_id, download_key, image_url, host, occ_json, status, updated_at)
-    VALUES (@gbif_id, @download_key, @image_url, @host, @occ_json, 'pending', datetime('now'))`);
-  const tx = db.transaction((batch) => { for (const r of batch) stmt.run(r); });
+    (gbif_id, download_key, image_url, host, host_seq, occ_json, status, updated_at)
+    VALUES (@gbif_id, @download_key, @image_url, @host, @host_seq, @occ_json, 'pending', datetime('now'))`);
+  const tx = db.transaction((batch) => {
+    for (const r of batch) { r.host_seq = nextSeq(r.host); stmt.run(r); }
+  });
   tx(rows);
   return rows.length;
 }
@@ -241,7 +277,8 @@ function nextQueueBatch(dbFile, { key, status = 'pending', limit = 500 } = {}) {
   const args = [status];
   let where = 'status = ?';
   if (key) { where += ' AND download_key = ?'; args.push(String(key)); }
-  return db.prepare(`SELECT * FROM download_queue WHERE ${where} ORDER BY host, gbif_id LIMIT ?`).all(...args, limit);
+  // host_seq first → domain-interleaved order (round-robin across hosts).
+  return db.prepare(`SELECT * FROM download_queue WHERE ${where} ORDER BY host_seq, host LIMIT ?`).all(...args, limit);
 }
 
 function setQueueStatus(dbFile, gbifId, status, err) {
@@ -265,9 +302,55 @@ function queueCounts(dbFile, key) {
   const args = key ? [String(key)] : [];
   const where = key ? 'WHERE download_key = ?' : '';
   const rows = db.prepare(`SELECT status, COUNT(*) AS n FROM download_queue ${where} GROUP BY status`).all(...args);
-  const out = { pending: 0, in_progress: 0, blocked: 0, done: 0, failed: 0, skipped: 0, total: 0 };
+  const out = { pending: 0, in_progress: 0, blocked: 0, done: 0, failed: 0, broken: 0, skipped: 0, total: 0 };
   for (const r of rows) { out[r.status] = r.n; out.total += r.n; }
   return out;
+}
+
+// Record a per-image terminal/intermediate outcome (status + winning-or-last
+// method + http status). attempts is incremented so we can see how many tries.
+function setQueueOutcome(dbFile, gbifId, { status, method, http_status, error }) {
+  return open(dbFile).prepare(
+    `UPDATE download_queue SET status=@status, method=@method, http_status=@http_status,
+       last_error=@error, attempts=attempts+1, updated_at=datetime('now') WHERE gbif_id=@id`
+  ).run({ id: String(gbifId), status, method: method || null, http_status: http_status != null ? http_status : null, error: error || null }).changes;
+}
+
+// Append a fetch attempt (or a batch of them) to the analysis log.
+function logFetch(dbFile, e) {
+  open(dbFile).prepare(
+    `INSERT INTO fetch_log (gbif_id, host, method, outcome, http_status, message)
+     VALUES (@gbif_id, @host, @method, @outcome, @http_status, @message)`
+  ).run({
+    gbif_id: e.gbif_id != null ? String(e.gbif_id) : null, host: e.host || null,
+    method: e.method || null, outcome: e.outcome || null,
+    http_status: e.http_status != null ? e.http_status : null, message: e.message ? String(e.message).slice(0, 300) : null,
+  });
+}
+function logFetchBatch(dbFile, entries) {
+  if (!entries || !entries.length) return;
+  const db = open(dbFile);
+  const tx = db.transaction((list) => { for (const e of list) logFetch(dbFile, e); });
+  tx(entries);
+}
+
+// Per-domain fetch analytics: attempts + successes + block/broken/fail counts,
+// and which method won most for each host. For a future Viewer "diagnostics" view.
+function fetchStats(dbFile) {
+  const db = open(dbFile);
+  const byHost = db.prepare(
+    `SELECT host,
+       COUNT(*) AS attempts,
+       SUM(outcome='success') AS ok,
+       SUM(outcome='blocked') AS blocked,
+       SUM(outcome='broken') AS broken,
+       SUM(outcome NOT IN ('success','blocked','broken')) AS failed
+     FROM fetch_log GROUP BY host ORDER BY attempts DESC`
+  ).all();
+  const winners = db.prepare(
+    `SELECT host, method, COUNT(*) AS n FROM fetch_log WHERE outcome='success' AND method IS NOT NULL GROUP BY host, method ORDER BY host, n DESC`
+  ).all();
+  return { byHost, winners };
 }
 
 // On restart, any in_progress row was interrupted — requeue it.
@@ -282,4 +365,5 @@ module.exports = {
   insertDownload, updateDownload, getDownload, listDownloads, getActiveDownloads,
   enqueue, markSkippedAlreadyDownloaded, nextQueueBatch, setQueueStatus,
   bumpQueueAttempt, queueCounts, resetInProgress,
+  setQueueOutcome, logFetch, logFetchBatch, fetchStats,
 };

@@ -253,6 +253,8 @@ async function drainPass(parentDir, key, job) {
   const maybePush = () => { const n = Date.now(); if (n - lastPush > 800) { lastPush = n; pushProgress(parentDir, key); } };
 
   const worker = async () => {
+    let lastHost = null;
+    let streak = 0; // consecutive same-host downloads by THIS worker
     while (!job.cancelled) {
       const row = claim();
       if (!row) {
@@ -260,15 +262,23 @@ async function drainPass(parentDir, key, job) {
         await sleep(100);
         continue;
       }
+      // >5 in a row from one host → 2s rest to give that server a break; the
+      // moment the host changes, streak resets and there's no delay.
+      if (row.host === lastHost) streak += 1; else { streak = 1; lastHost = row.host; }
+      if (streak > 5) await sleep(2000);
       inc(row.host);
       try {
         const occ = JSON.parse(row.occ_json || '{}');
-        const buf = await imageFetch.tryDirect(row.image_url);
+        const buf = await imageFetch.tryDirect(row.image_url); // ONE attempt, no retry
         await downloadService.saveOne({ parentDir, occ, publisher: null, imageBuffer: buf, imageUrl: row.image_url });
-        db.setQueueStatus(dbFile, row.gbif_id, 'done');
+        db.setQueueOutcome(dbFile, row.gbif_id, { status: 'done', method: 'direct', http_status: 200 });
+        db.logFetch(dbFile, { gbif_id: row.gbif_id, host: row.host, method: 'direct', outcome: 'success', http_status: 200 });
       } catch (e) {
-        if (e.blocked) db.setQueueStatus(dbFile, row.gbif_id, 'blocked', e.message);
-        else db.bumpQueueAttempt(dbFile, row.gbif_id, e.message);
+        db.logFetch(dbFile, { gbif_id: row.gbif_id, host: row.host, method: 'direct', outcome: e.outcome || 'error', http_status: e.status, message: e.message });
+        const kind = e.kind || 'transient';
+        if (kind === 'blocked') db.setQueueOutcome(dbFile, row.gbif_id, { status: 'blocked', http_status: e.status, error: e.message }); // → webview drain
+        else if (kind === 'broken') db.setQueueOutcome(dbFile, row.gbif_id, { status: 'broken', method: 'direct', http_status: e.status, error: e.message }); // dead link — never retry
+        else db.setQueueOutcome(dbFile, row.gbif_id, { status: 'failed', method: 'direct', http_status: e.status, error: e.message }); // transient — retry later
       } finally {
         dec(row.host);
         await sleep(60 + Math.floor(Math.random() * 140)); // jitter, per worker
@@ -287,23 +297,31 @@ function nextBlocked(parentDir, key, limit = 12) {
   return rows.map((r) => ({ gbif_id: r.gbif_id, image_url: r.image_url }));
 }
 
-async function saveBlocked(parentDir, key, gbifId, imageBuffer) {
+async function saveBlocked(parentDir, key, gbifId, imageBuffer, method, trail) {
   const dbFile = dbFileFor(parentDir);
   const row = db.open(dbFile).prepare('SELECT * FROM download_queue WHERE gbif_id = ?').get(String(gbifId));
   if (!row) return;
+  db.logFetchBatch(dbFile, (trail || []).map((a) => ({ ...a, gbif_id: gbifId, host: row.host })));
   try {
     const occ = JSON.parse(row.occ_json || '{}');
     await downloadService.saveOne({ parentDir, occ, publisher: null, imageBuffer, imageUrl: row.image_url });
-    db.setQueueStatus(dbFile, gbifId, 'done');
+    db.setQueueOutcome(dbFile, gbifId, { status: 'done', method: method || 'webview', http_status: 200 });
   } catch (e) {
-    db.setQueueStatus(dbFile, gbifId, 'failed', e.message);
+    db.setQueueOutcome(dbFile, gbifId, { status: 'failed', method: method || 'webview', error: e.message });
   }
   checkComplete(parentDir, key);
   pushProgress(parentDir, key);
 }
 
-function failBlocked(parentDir, key, gbifId, err) {
-  db.setQueueStatus(dbFileFor(parentDir), gbifId, 'failed', err || 'webview fetch failed');
+// info = { kind:'broken'|'failed', status, trail:[{method,outcome,http_status,message}] }
+function failBlocked(parentDir, key, gbifId, info) {
+  const dbFile = dbFileFor(parentDir);
+  const row = db.open(dbFile).prepare('SELECT host FROM download_queue WHERE gbif_id = ?').get(String(gbifId));
+  const host = row ? row.host : null;
+  const trail = (info && info.trail) || [];
+  db.logFetchBatch(dbFile, trail.map((a) => ({ ...a, gbif_id: gbifId, host })));
+  const status = (info && info.kind === 'broken') ? 'broken' : 'failed'; // broken → never retry
+  db.setQueueOutcome(dbFile, gbifId, { status, method: 'webview', http_status: info && info.status, error: 'all webview fallbacks failed' });
   checkComplete(parentDir, key);
   pushProgress(parentDir, key);
 }
