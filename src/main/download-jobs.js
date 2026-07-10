@@ -418,10 +418,21 @@ async function cancel(key) {
   pushProgress(parentDir, key);
 }
 
+// A manual Resume gives everything a clean retry: drop the in-memory per-host
+// backoff (429 cooldowns, unreachable strikes, sensitive caps) so a drain that had
+// throttled itself right down doesn't stay stuck when the user asks it to go again.
+function clearBackoff(job) {
+  if (!job) return;
+  job.hostCooldown = new Map();
+  job.hostSensitive = new Set();
+  job.hostTimeouts = new Map();
+}
+
 // Restart a paused image drain (renderer "resume" button).
 function resume(key) {
   const job = jobs.get(key) || {};
   job.paused = false; job.cancelled = false; // explicit resume clears the sticky pause
+  clearBackoff(job);
   const parentDir = job.parentDir || settings.getParentDir();
   if (!parentDir) return;
   jobs.set(key, job);
@@ -439,7 +450,7 @@ async function resumeProject(parentDir) {
   db.resetInProgress(dbFile);
   for (const row of active) {
     const existing = jobs.get(row.key);
-    if (existing) { existing.cancelled = false; existing.paused = false; } // un-pause
+    if (existing) { existing.cancelled = false; existing.paused = false; clearBackoff(existing); } // un-pause + clean retry
     const st = row.status;
     if (['PREPARING', 'RUNNING'].includes(st)) {
       startPoll(parentDir, row.key);
