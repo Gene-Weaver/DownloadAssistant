@@ -41,7 +41,7 @@
   const state = {
     view: null, currentId: null, onSearch: false, busy: false,
     parentReady: false, bulk: { running: false, cancel: false },
-    bookmarks: [], menuOpen: false,
+    bookmarks: [], menuOpen: false, enumerating: false,
   };
   const els = {};
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -183,7 +183,8 @@
     if (!/\/occurrence\/(search|gallery)/.test(url || '')) {
       toast('Open a GBIF search (gallery) first.', 'error'); return;
     }
-    state.busy = true; updateActionButtons(); setStatus('enumerating search results…', 'work');
+    state.busy = true; state.enumerating = true; updateActionButtons();
+    setStatus('enumerating search results…', 'work');
     let res;
     try {
       res = await api.gbif.enumerateSearch(url);
@@ -191,7 +192,7 @@
       toast(err.message || 'Could not read the search.', 'error');
       return;
     } finally {
-      state.busy = false; setStatus('', ''); updateActionButtons();
+      state.busy = false; state.enumerating = false; setStatus('', ''); updateActionButtons();
     }
 
     const occ = res.occurrences || [];
@@ -447,6 +448,11 @@
 
   function mount() {
     ensureDownloadListener();
+    // Live enumeration progress (parallel paging can take a few seconds).
+    api.gbif.onEnumProgress(({ found, total }) => {
+      if (!state.enumerating) return;
+      setStatus(`enumerating… ${found}${total ? ` of ${Number(total).toLocaleString()}` : ''} found`, 'work');
+    });
     wire();
     updateActionButtons();
     onNav(safeGetURL());

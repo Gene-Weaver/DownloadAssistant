@@ -25,8 +25,14 @@ const GBIF_API = 'https://api.gbif.org/v1';
 const OCC_WEB = 'https://www.gbif.org/occurrence';
 const FETCH_TIMEOUT_MS = 30000;
 
-const ENUM_PAGE = 300;      // GBIF's maximum page size
-const ENUM_MAX = 100000;    // GBIF's search offset ceiling — effectively "no cap"
+const ENUM_PAGE = 300;            // GBIF's maximum page size
+const ENUM_HARD_OFFSET = 100000; // GBIF rejects offset+limit beyond this (HTTP 400)
+const ENUM_CONCURRENCY = 6;      // parallel page fetches (be polite to the API)
+// GBIF occurrence search uses Elasticsearch offset paging, which is fast for
+// shallow offsets (~1s) but falls off a cliff at deep ones (offset ~10k+ times
+// out entirely). A short per-page timeout lets us detect that "wall" fast and
+// stop, instead of hanging 30s and failing the whole enumeration.
+const ENUM_PAGE_TIMEOUT_MS = 12000;
 
 // gbif.org's CURRENT default taxonomy is Catalogue of Life XR, whose taxon keys
 // are alphanumeric (e.g. taxonKey=4J2JZ = Pinus torreyana) — NOT the classic
@@ -58,9 +64,9 @@ function cacheOcc(id, rec) {
 const ORG = new Map();
 
 // --- fetch helpers --------------------------------------------------------
-async function fetchJson(url) {
+async function fetchJson(url, timeoutMs = FETCH_TIMEOUT_MS) {
   const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort(), FETCH_TIMEOUT_MS);
+  const timer = setTimeout(() => ctl.abort(), timeoutMs);
   try {
     const res = await fetch(url, { headers: { Accept: 'application/json' }, signal: ctl.signal });
     if (!res.ok) throw new Error(`GBIF request failed (${res.status}).`);
@@ -171,49 +177,94 @@ function buildSearchApiUrl(searchUrl, { limit, offset }) {
   return api.toString();
 }
 
+// Flatten a page's occurrence records to compact rows (+ cache the full record
+// for save/DwC reuse). Preview filename uses the page record; the authoritative
+// name is recomputed at save time (publisher fallback skipped here for speed).
+function flattenPage(results, out) {
+  for (const occ of (results || [])) {
+    const img = pickImageUrl(occ);
+    if (!img) continue;
+    const id = String(occ.key);
+    cacheOcc(id, occ);
+    const fn = generateImageFilename(occ, null);
+    out.push({ gbif_id: id, image_url: img, scientific_name: occ.scientificName || null, fullname: fn.fullname, filename: fn.filenameJpg });
+  }
+}
+
 /*
  * Enumerate every imaged occurrence matching the current GBIF search by
- * paginating the JSON API (not by scraping the gallery). Full records are cached
- * so save/DwC can reuse them. Returns the compact list plus the true total, a
- * stable slug for the DwC subfolder, and whether the offset ceiling was hit.
+ * paginating the JSON API (not by scraping the gallery).
+ *
+ * Pages are fetched with a bounded PARALLEL worker pool. GBIF's offset paging
+ * dies at deep offsets, so we detect that adaptively: when a page times out (or
+ * errors), we treat its offset as the "wall", stop handing out deeper offsets,
+ * keep the contiguous prefix below the wall, and mark the result `capped` (the
+ * UI tells the user to narrow the search). This never hangs and never throws for
+ * a large search — only a failure on the FIRST page (the count source) throws.
+ *
+ * Full records are cached so save/DwC reuse them. Returns { total, occurrences,
+ * capped, slug, api_url }.
  */
 async function enumerateSearch(searchUrl, { onProgress } = {}) {
   if (!/^https?:\/\//i.test(String(searchUrl || ''))) {
     throw new Error('Open a GBIF search (gallery) first.');
   }
-  const out = [];
-  let offset = 0, total = 0, endOfRecords = false;
-  while (out.length < ENUM_MAX && !endOfRecords && offset <= ENUM_MAX) {
-    const page = await fetchJson(buildSearchApiUrl(searchUrl, { limit: ENUM_PAGE, offset }));
-    total = page.count || 0;
-    for (const occ of (page.results || [])) {
-      const img = pickImageUrl(occ);
-      if (!img) continue;
-      const id = String(occ.key);
-      cacheOcc(id, occ);
-      // Preview filename from the page record (publisher fallback is skipped for
-      // speed; the authoritative name is recomputed at save time).
-      const fn = generateImageFilename(occ, null);
-      out.push({
-        gbif_id: id,
-        image_url: img,
-        scientific_name: occ.scientificName || null,
-        fullname: fn.fullname,
-        filename: fn.filenameJpg,
-      });
-      if (out.length >= ENUM_MAX) break;
+
+  // Page 0 first — the authoritative count + first results. A failure here is a
+  // real error (bad search / network), so let it throw.
+  const page0 = await fetchJson(buildSearchApiUrl(searchUrl, { limit: ENUM_PAGE, offset: 0 }), ENUM_PAGE_TIMEOUT_MS);
+  const total = page0.count || 0;
+  const api_url = buildSearchApiUrl(searchUrl, { limit: ENUM_PAGE, offset: 0 });
+  const slug = deriveSlug(searchUrl);
+
+  const pages = new Map();           // offset -> results[] (successful pages)
+  pages.set(0, page0.results || []);
+  let found = (page0.results || []).length;
+  if (onProgress) onProgress(found, total);
+
+  // Remaining offsets, ascending, bounded by count and GBIF's hard offset cap.
+  const lastOffset = Math.min(total, ENUM_HARD_OFFSET) - 1;
+  const offsets = [];
+  for (let off = ENUM_PAGE; off <= lastOffset; off += ENUM_PAGE) offsets.push(off);
+
+  let wall = Infinity; // smallest offset that failed → deep-pagination wall
+  let cursor = 0;
+
+  const fetchPage = async (off) => {
+    try { return await fetchJson(buildSearchApiUrl(searchUrl, { limit: ENUM_PAGE, offset: off }), ENUM_PAGE_TIMEOUT_MS); }
+    catch (e) {
+      // Retry once only for SHALLOW offsets (rides out a transient blip). A deep
+      // failure is the pagination wall — don't burn a second timeout on it.
+      if (off > 3000) throw e;
+      return await fetchJson(buildSearchApiUrl(searchUrl, { limit: ENUM_PAGE, offset: off }), ENUM_PAGE_TIMEOUT_MS);
     }
-    endOfRecords = !!page.endOfRecords;
-    offset += ENUM_PAGE;
-    if (onProgress) onProgress(out.length, total);
-  }
-  return {
-    total,
-    occurrences: out,
-    capped: total > out.length,
-    slug: deriveSlug(searchUrl),
-    api_url: buildSearchApiUrl(searchUrl, { limit: ENUM_PAGE, offset: 0 }),
   };
+
+  const worker = async () => {
+    while (true) {
+      const i = cursor++;
+      if (i >= offsets.length) break;
+      const off = offsets[i];
+      if (off >= wall) break; // already past a discovered wall
+      let page;
+      try { page = await fetchPage(off); }
+      catch (_) { if (off < wall) wall = off; break; } // hit the wall — stop going deeper
+      pages.set(off, page.results || []);
+      found += (page.results || []).length;
+      if (onProgress) onProgress(found, total);
+    }
+  };
+
+  await Promise.all(Array.from({ length: Math.min(ENUM_CONCURRENCY, offsets.length) }, worker));
+
+  // Assemble the CONTIGUOUS prefix (offsets below the wall), ascending.
+  const out = [];
+  const kept = [...pages.keys()].filter((o) => o < wall).sort((a, b) => a - b);
+  for (const off of kept) flattenPage(pages.get(off), out);
+
+  const enumerated = kept.length * ENUM_PAGE; // records we actually paged through
+  const capped = (wall !== Infinity) || (total > enumerated);
+  return { total, occurrences: out, capped, slug, api_url };
 }
 
 // --- Darwin Core file output ---------------------------------------------

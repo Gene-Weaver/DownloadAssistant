@@ -63,9 +63,12 @@ overrides.
 - **ACQUIRE TARGET** — download the specimen currently open on GBIF. When you
   open a specimen page the status bar shows a `TARGET LOCKED ▸ <filename>`
   preview (and flags it if already in the index).
-- **ACQUIRE SEARCH…** — enumerate every imaged occurrence in the current search
-  and download **all** of them, or a **random subset** (default 20). There is no
-  fixed cap; already-indexed ids are skipped before any download.
+- **ACQUIRE SEARCH…** — enumerate the imaged occurrences in the current search
+  and download **all** of them, or a **random subset** (default 20). Enumeration
+  pages the GBIF API in parallel (no artificial cap); GBIF's offset search dies
+  at deep offsets (~10k+ for heavy queries), so it stops adaptively at that wall
+  and marks the result *capped* (narrow the search to reach the rest). Already-
+  indexed ids are skipped before any download.
 - **☆ BOOKMARK** — save the current GBIF search; the caret opens your saved
   searches. Bookmarks are **app-wide, keyed by domain** (stored in
   `userData/bookmarks.json`), so when more source tabs are added each site keeps
