@@ -1,16 +1,15 @@
 /*
  * Viewer tab.
  *
- * Browses what's been downloaded under the current parent_dir:
- *   - DATABASE: the images.db schema (PRAGMA strip) + its rows, each rendered as
- *     a collapsible JSON-tree item.
- *   - DWC FOLDERS: pick a dwc/{slug}/ folder + occurrence.csv|multimedia.csv and
- *     browse its rows as JSON-tree items.
- * Selecting/expanding a row loads its image into the right-hand panel (delivered
- * as a downsized data: URL over IPC, since the CSP blocks external file://).
+ * Three columns: a 20% list of stacked row buttons (gbifId · fullname), a 50%
+ * JSON view of the selected row, and a 30% image preview. Clicking the preview
+ * opens a lightbox with zoom/pan and prev/next cycling through the current page.
  *
- * Exposes window.DA.ViewerPage = { mount, refresh, setParentReady } — same shape
- * as GbifPage; app.js drives it.
+ * Sources: DATABASE (images.db schema + rows) and DWC FOLDERS (a dwc/{slug}/
+ * occurrence.csv | multimedia.csv). Images are delivered as downsized data URLs
+ * over IPC (the CSP blocks external file://).
+ *
+ * Exposes window.DA.ViewerPage = { mount, refresh, setParentReady }.
  */
 (function () {
   const api = window.DA.api;
@@ -19,7 +18,8 @@
   const state = {
     src: 'db', folder: null, file: 'occurrence.csv', search: '',
     page: 0, pageSize: 100, total: 0,
-    parentReady: false, mounted: false, imgToken: 0, selectedEl: null,
+    parentReady: false, mounted: false, imgToken: 0,
+    rows: [], selectedIndex: -1,
   };
   const els = {};
   let searchTimer = null;
@@ -37,7 +37,6 @@
     if (v === '') return '∅';
     return String(v);
   }
-
   function makeLeaf(key, value) {
     const leaf = document.createElement('div');
     leaf.className = 'jtree-leaf';
@@ -46,9 +45,6 @@
     leaf.append(k, v);
     return leaf;
   }
-
-  // Collapsible object/array node; children are built LAZILY on first expand so
-  // collapsed rows never construct DOM.
   function makeNode(label, value, { expanded = false } = {}) {
     const node = document.createElement('div');
     node.className = 'jtree-node' + (expanded ? '' : ' collapsed');
@@ -59,28 +55,19 @@
     const preview = document.createElement('span'); preview.className = 'jtree-preview';
     preview.textContent = Array.isArray(value) ? `[${value.length}]` : `{${entries.length}}`;
     head.append(toggle, k, preview);
-
     const children = document.createElement('div'); children.className = 'jtree-children';
     let built = false;
-    const build = () => {
-      if (built) return; built = true;
-      for (const [ck, cv] of entries) children.append(isScalar(cv) ? makeLeaf(ck, cv) : makeNode(ck, cv));
-    };
+    const build = () => { if (built) return; built = true; for (const [ck, cv] of entries) children.append(isScalar(cv) ? makeLeaf(ck, cv) : makeNode(ck, cv)); };
     if (expanded) build();
-
-    const setExpanded = (exp) => {
-      node.classList.toggle('collapsed', !exp);
-      toggle.textContent = exp ? '▾' : '▸';
-      if (exp) build();
-    };
-    node._setExpanded = setExpanded;
-    node._head = head;
-    node._toggleFromHead = () => setExpanded(node.classList.contains('collapsed'));
+    head.addEventListener('click', () => {
+      const collapsed = node.classList.toggle('collapsed');
+      toggle.textContent = collapsed ? '▸' : '▾';
+      if (!collapsed) build();
+    });
     node.append(head, children);
     return node;
   }
 
-  // --- row rendering --------------------------------------------------------
   function rowLabel(rec) {
     if (state.src === 'db') {
       return `${rec.gbif_id != null ? rec.gbif_id : '?'} · ${rec.fullname || rec.scientific_name || ''}`.trim();
@@ -90,28 +77,50 @@
     return `${id} · ${rec.scientificName || rec.acceptedScientificName || rec.genus || ''}`.trim();
   }
 
+  // --- rows (left) + json (middle) -----------------------------------------
+  function renderEmpty(msg) { els.list.innerHTML = `<div class="vw-empty">${esc(msg)}</div>`; }
+  function clearJson() { els.json.innerHTML = '<div class="vw-empty">— select a row to view its fields —</div>'; }
+
   function renderRows(records) {
+    state.rows = records || [];
+    state.selectedIndex = -1;
     els.list.innerHTML = '';
-    state.selectedEl = null;
-    if (!records.length) { els.list.innerHTML = '<div class="vw-empty">— no rows —</div>'; return; }
-    for (const rec of records) {
-      const node = makeNode(rowLabel(rec), rec, { expanded: false });
-      node.classList.add('jtree-row');
-      node._head.addEventListener('click', () => {
-        node._toggleFromHead();
-        selectRow(node, rec);
-      });
-      els.list.append(node);
-    }
+    if (!state.rows.length) { renderEmpty('— no rows —'); clearJson(); clearImage(); return; }
+    state.rows.forEach((rec, idx) => {
+      const btn = document.createElement('button');
+      btn.className = 'vw-row-btn';
+      btn.textContent = rowLabel(rec);
+      btn.title = rowLabel(rec);
+      btn.addEventListener('click', () => selectRow(idx));
+      els.list.append(btn);
+    });
+    selectRow(0); // auto-show the first row
   }
 
-  function renderEmpty(msg) {
-    els.list.innerHTML = `<div class="vw-empty">${esc(msg)}</div>`;
+  function highlightRow(index) {
+    state.selectedIndex = index;
+    const btns = els.list.querySelectorAll('.vw-row-btn');
+    btns.forEach((b, i) => b.classList.toggle('selected', i === index));
+    if (btns[index]) btns[index].scrollIntoView({ block: 'nearest' });
+    renderJson(state.rows[index]);
   }
 
-  // --- image panel ----------------------------------------------------------
+  function selectRow(index) {
+    if (index < 0 || index >= state.rows.length) return;
+    highlightRow(index);
+    loadImage(state.rows[index]);
+  }
+
+  function renderJson(rec) {
+    els.json.innerHTML = '';
+    const box = document.createElement('div');
+    box.className = 'jtree';
+    for (const [k, v] of Object.entries(rec)) box.append(isScalar(v) ? makeLeaf(k, v) : makeNode(k, v));
+    els.json.append(box);
+  }
+
+  // --- image panel (right) --------------------------------------------------
   function setImageState(mode, opts = {}) {
-    // mode: 'hint' | 'loading' | 'missing' | 'image'
     if (mode === 'image') {
       els.imgEmpty.hidden = true;
       els.img.hidden = false;
@@ -119,43 +128,143 @@
       els.imgCap.textContent = `${opts.filename || ''}  ${opts.width}×${opts.height}`.trim();
       return;
     }
-    els.img.hidden = true; els.img.src = ''; els.imgCap.textContent = '';
+    els.img.hidden = true; els.img.removeAttribute('src'); els.imgCap.textContent = '';
     els.imgEmpty.hidden = false;
     els.imgEmpty.classList.toggle('missing', mode === 'missing');
     els.imgEmpty.textContent = mode === 'loading' ? '◌ loading…'
       : mode === 'missing' ? `◇ ${opts.msg}`
       : '◇ select an item to preview its image';
   }
+  function clearImage() { state.imgToken++; setImageState('hint'); }
 
-  function clearImage() {
-    if (state.selectedEl) { state.selectedEl.classList.remove('selected'); state.selectedEl = null; }
-    state.imgToken++; // invalidate any in-flight load
-    setImageState('hint');
-  }
-
-  function selectRow(node, rec) {
-    if (state.selectedEl && state.selectedEl !== node) state.selectedEl.classList.remove('selected');
-    node.classList.add('selected');
-    state.selectedEl = node;
-    loadImage(rec);
+  // Fetch the selected row's image at a given max dimension (panel: 1400,
+  // lightbox: 2600). DB row → by filename (fallback by gbif_id); DwC row → by id.
+  function resolveImage(rec, maxDim) {
+    if (state.src === 'db') {
+      if (rec.filename) return Promise.resolve(api.viewer.imageByFilename(rec.filename, maxDim))
+        .then((r) => r || (rec.gbif_id ? api.viewer.imageByGbifId(rec.gbif_id, maxDim) : null));
+      if (rec.gbif_id) return Promise.resolve(api.viewer.imageByGbifId(rec.gbif_id, maxDim));
+      return Promise.resolve(null);
+    }
+    const id = rec.gbifID || rec.gbifID_images || rec.gbif_id;
+    return id ? Promise.resolve(api.viewer.imageByGbifId(id, maxDim)) : Promise.resolve(null);
   }
 
   async function loadImage(rec) {
     const token = ++state.imgToken;
     setImageState('loading');
     let res = null;
-    try {
-      if (state.src === 'db') {
-        if (rec.filename) res = await api.viewer.imageByFilename(rec.filename);
-        if (!res && rec.gbif_id) res = await api.viewer.imageByGbifId(rec.gbif_id);
-      } else {
-        const id = rec.gbifID || rec.gbifID_images || rec.gbif_id;
-        if (id) res = await api.viewer.imageByGbifId(id);
-      }
-    } catch (_) { /* handled below */ }
-    if (token !== state.imgToken) return; // a newer selection superseded this
+    try { res = await resolveImage(rec, 1400); } catch (_) { /* handled below */ }
+    if (token !== state.imgToken) return; // superseded
     if (res && res.dataUrl) setImageState('image', res);
     else setImageState('missing', { msg: state.src === 'dwc' ? 'not downloaded yet' : 'image file missing' });
+  }
+
+  // --- lightbox (zoom + pan + prev/next) -----------------------------------
+  const lb = { el: null, img: null, cap: null, zlabel: null, open: false, index: -1, scale: 1, tx: 0, ty: 0, dragging: false, lastX: 0, lastY: 0, token: 0 };
+
+  function applyTransform() {
+    lb.img.style.transform = `translate(${lb.tx}px, ${lb.ty}px) scale(${lb.scale})`;
+    if (lb.zlabel) lb.zlabel.textContent = `${Math.round(lb.scale * 100)}%`;
+  }
+  function resetZoom() { lb.scale = 1; lb.tx = 0; lb.ty = 0; applyTransform(); }
+  function zoomBy(f) {
+    lb.scale = Math.min(8, Math.max(1, lb.scale * f));
+    if (lb.scale === 1) { lb.tx = 0; lb.ty = 0; }
+    applyTransform();
+  }
+
+  function buildLightbox() {
+    const el = document.createElement('div');
+    el.className = 'vw-lightbox';
+    el.hidden = true;
+    el.innerHTML = `
+      <button class="vw-lb-close" title="Close (Esc)">✕</button>
+      <button class="vw-lb-arrow vw-lb-prev" title="Previous (←)">‹</button>
+      <img class="vw-lb-img grab" alt="" />
+      <button class="vw-lb-arrow vw-lb-next" title="Next (→)">›</button>
+      <div class="vw-lb-bar">
+        <button class="vw-lb-zoombtn" data-z="out" title="Zoom out">−</button>
+        <span class="vw-lb-zlabel">100%</span>
+        <button class="vw-lb-zoombtn" data-z="in" title="Zoom in">+</button>
+        <button class="vw-lb-zoombtn" data-z="reset" title="Reset">⟲</button>
+        <span class="vw-lb-cap"></span>
+        <span class="vw-lb-hint">scroll = zoom · drag = pan · ←/→ = cycle</span>
+      </div>`;
+    document.body.append(el);
+    lb.el = el;
+    lb.img = el.querySelector('.vw-lb-img');
+    lb.cap = el.querySelector('.vw-lb-cap');
+    lb.zlabel = el.querySelector('.vw-lb-zlabel');
+
+    el.querySelector('.vw-lb-close').addEventListener('click', closeLightbox);
+    el.querySelector('.vw-lb-prev').addEventListener('click', (e) => { e.stopPropagation(); lbStep(-1); });
+    el.querySelector('.vw-lb-next').addEventListener('click', (e) => { e.stopPropagation(); lbStep(1); });
+    el.querySelectorAll('.vw-lb-zoombtn').forEach((b) => b.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const z = b.dataset.z;
+      if (z === 'in') zoomBy(1.25); else if (z === 'out') zoomBy(0.8); else resetZoom();
+    }));
+    el.addEventListener('click', (e) => { if (e.target === el) closeLightbox(); }); // backdrop
+    lb.img.addEventListener('click', (e) => e.stopPropagation());
+    lb.img.addEventListener('wheel', (e) => { e.preventDefault(); zoomBy(e.deltaY < 0 ? 1.12 : 0.89); }, { passive: false });
+    lb.img.addEventListener('mousedown', (e) => { e.preventDefault(); lb.dragging = true; lb.lastX = e.clientX; lb.lastY = e.clientY; lb.img.classList.add('grabbing'); });
+    window.addEventListener('mousemove', (e) => { if (!lb.dragging) return; lb.tx += e.clientX - lb.lastX; lb.ty += e.clientY - lb.lastY; lb.lastX = e.clientX; lb.lastY = e.clientY; applyTransform(); });
+    window.addEventListener('mouseup', () => { if (lb.dragging) { lb.dragging = false; lb.img.classList.remove('grabbing'); } });
+    lb.img.addEventListener('dblclick', (e) => { e.preventDefault(); if (lb.scale > 1) resetZoom(); else zoomBy(2); });
+  }
+
+  function lbKey(e) {
+    if (e.key === 'Escape') closeLightbox();
+    else if (e.key === 'ArrowLeft') lbStep(-1);
+    else if (e.key === 'ArrowRight') lbStep(1);
+    else if (e.key === '+' || e.key === '=') zoomBy(1.25);
+    else if (e.key === '-') zoomBy(0.8);
+  }
+
+  async function lbLoad(index) {
+    resetZoom();
+    const token = ++lb.token;
+    const rec = state.rows[index];
+    lb.img.hidden = false;
+    lb.img.removeAttribute('src');
+    lb.cap.textContent = 'loading…';
+    let res = null;
+    try { res = await resolveImage(rec, 2600); } catch (_) { /* handled below */ }
+    if (token !== lb.token || !lb.open) return;
+    if (res && res.dataUrl) {
+      lb.img.hidden = false;
+      lb.img.src = res.dataUrl;
+      lb.cap.textContent = `${res.filename || rowLabel(rec)}  ${res.width}×${res.height}`;
+    } else {
+      lb.img.hidden = true;
+      lb.cap.textContent = `${state.src === 'dwc' ? 'not downloaded yet' : 'image file missing'} — ${rowLabel(rec)}`;
+    }
+  }
+
+  function lbStep(delta) {
+    if (!state.rows.length) return;
+    let i = lb.index + delta;
+    if (i < 0) i = state.rows.length - 1;
+    if (i >= state.rows.length) i = 0;
+    lb.index = i;
+    highlightRow(i);   // keep the left list + JSON in sync (no panel refetch)
+    lbLoad(i);
+  }
+
+  function openLightbox(index) {
+    if (index < 0 || index >= state.rows.length) return;
+    if (!lb.el) buildLightbox();
+    lb.open = true; lb.index = index; lb.el.hidden = false;
+    document.addEventListener('keydown', lbKey);
+    lbLoad(index);
+  }
+  function closeLightbox() {
+    lb.open = false;
+    if (lb.el) lb.el.hidden = true;
+    document.removeEventListener('keydown', lbKey);
+    // sync the panel image to wherever we cycled to
+    if (state.rows[lb.index]) loadImage(state.rows[lb.index]);
   }
 
   // --- loaders --------------------------------------------------------------
@@ -172,21 +281,17 @@
 
   async function loadDb() {
     els.folder.hidden = true; els.file.hidden = true; els.schema.hidden = false;
-    try {
-      const info = await api.viewer.dbSchema();
-      renderSchema(info.columns, info.rowCount);
-    } catch (_) { els.schema.innerHTML = ''; }
+    try { const info = await api.viewer.dbSchema(); renderSchema(info.columns, info.rowCount); }
+    catch (_) { els.schema.innerHTML = ''; }
     await loadDbRows();
   }
-
   async function loadDbRows() {
     const res = await api.viewer.dbRows({ limit: state.pageSize, offset: state.page * state.pageSize, search: state.search });
     state.total = res.total;
-    if (!res.rows.length && !state.search) renderEmpty('— database is empty (nothing acquired yet) —');
+    if (!res.rows.length && !state.search) { renderEmpty('— database is empty (nothing acquired yet) —'); clearJson(); clearImage(); }
     else renderRows(res.rows);
     els.count.textContent = `${res.total} row(s)`;
     setPager(res.offset, res.rows.length, res.total);
-    clearImage();
   }
 
   async function loadDwc(reloadFolders) {
@@ -196,9 +301,8 @@
       const folders = await api.viewer.listDwc();
       if (!folders.length) {
         els.folder.innerHTML = '<option>— none —</option>';
-        renderEmpty('— no Darwin Core folders yet —');
-        els.count.textContent = ''; setPager(0, 0, 0); clearImage();
-        state.folder = null;
+        renderEmpty('— no Darwin Core folders yet —'); clearJson(); clearImage();
+        els.count.textContent = ''; setPager(0, 0, 0); state.folder = null;
         return;
       }
       els.folder.innerHTML = folders.map((f) => {
@@ -211,23 +315,16 @@
     if (!state.folder) return;
     await loadDwcRows();
   }
-
   async function loadDwcRows() {
     const res = await api.viewer.dwcRows(state.folder, state.file, { limit: state.pageSize, offset: state.page * state.pageSize, search: state.search });
     state.total = res.total;
-    if (!res.rows.length && !state.search) renderEmpty(`— ${state.file} is empty —`);
+    if (!res.rows.length && !state.search) { renderEmpty(`— ${state.file} is empty —`); clearJson(); clearImage(); }
     else renderRows(res.rows);
     els.count.textContent = `${res.total} row(s) · ${state.file}`;
     setPager(res.offset, res.rows.length, res.total);
-    clearImage();
   }
+  function reloadRows() { if (state.src === 'db') loadDbRows(); else loadDwcRows(); }
 
-  function reloadRows() {
-    if (state.src === 'db') loadDbRows();
-    else loadDwcRows();
-  }
-
-  // --- pager ----------------------------------------------------------------
   function setPager(offset, shown, total) {
     els.prev.disabled = state.page <= 0;
     els.next.disabled = offset + shown >= total;
@@ -237,10 +334,7 @@
   // --- source switch / wiring ----------------------------------------------
   function setSource(src) {
     if (src === state.src) return;
-    state.src = src;
-    state.page = 0;
-    state.search = ''; els.search.value = '';
-    state.folder = state.folder; // keep last dwc folder if any
+    state.src = src; state.page = 0; state.search = ''; els.search.value = '';
     els.srcBtns.forEach((b) => b.classList.toggle('active', b.dataset.src === src));
     refresh();
   }
@@ -251,12 +345,12 @@
       els.schema.innerHTML = ''; els.schema.hidden = true;
       els.folder.hidden = true; els.file.hidden = true;
       renderEmpty('◍ set a save location above to browse downloaded data');
-      els.count.textContent = ''; setPager(0, 0, 0); clearImage();
+      clearJson(); clearImage();
+      els.count.textContent = ''; setPager(0, 0, 0);
       return;
     }
     state.page = 0;
-    if (state.src === 'db') loadDb();
-    else loadDwc(true);
+    if (state.src === 'db') loadDb(); else loadDwc(true);
   }
 
   function setParentReady(ready) {
@@ -273,6 +367,7 @@
     els.refresh = document.getElementById('vw-refresh');
     els.schema = document.getElementById('vw-schema');
     els.list = document.getElementById('vw-list');
+    els.json = document.getElementById('vw-json');
     els.prev = document.getElementById('vw-prev');
     els.next = document.getElementById('vw-next');
     els.pageinfo = document.getElementById('vw-pageinfo');
@@ -290,9 +385,11 @@
     els.refresh.addEventListener('click', () => refresh());
     els.prev.addEventListener('click', () => { if (state.page > 0) { state.page--; reloadRows(); } });
     els.next.addEventListener('click', () => { state.page++; reloadRows(); });
+    els.img.addEventListener('click', () => { if (!els.img.hidden && state.selectedIndex >= 0) openLightbox(state.selectedIndex); });
 
+    clearJson();
     state.mounted = true;
-    // Do not auto-load; app.js calls refresh() when the tab is first shown.
+    // Do not auto-load; app.js calls refresh() when the tab is shown.
   }
 
   window.DA = window.DA || {};

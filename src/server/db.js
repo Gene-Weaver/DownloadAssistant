@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS images (
   continent        TEXT,
   country          TEXT,
   state_province   TEXT,             -- if present
+  event_date       TEXT,             -- DwC eventDate, if present
   filename         TEXT,             -- herbCode_gbifID_family_genus_specificEpithet.jpg
   img_x            INTEGER,          -- pixel width
   img_y            INTEGER,          -- pixel height
@@ -39,11 +40,19 @@ CREATE INDEX IF NOT EXISTS idx_images_fullname ON images(fullname);
 CREATE INDEX IF NOT EXISTS idx_images_family   ON images(family);
 `;
 
+// Additive migrations for DBs created by an earlier version (CREATE TABLE IF NOT
+// EXISTS won't add a new column to an existing table).
+function migrate(db) {
+  const cols = db.pragma('table_info(images)').map((c) => c.name);
+  if (!cols.includes('event_date')) db.exec('ALTER TABLE images ADD COLUMN event_date TEXT');
+}
+
 function open(dbFile) {
   if (conns.has(dbFile)) return conns.get(dbFile);
   const db = new Database(dbFile);
   db.pragma('journal_mode = WAL');
   db.exec(SCHEMA);
+  migrate(db);
   conns.set(dbFile, db);
   return db;
 }
@@ -65,8 +74,8 @@ function listDownloadedIds(dbFile) {
 const COLUMNS = [
   'gbif_id', 'herb_code', 'dwc_order', 'family', 'genus', 'specific_epithet',
   'fullname', 'scientific_name', 'latitude', 'longitude', 'continent', 'country',
-  'state_province', 'filename', 'img_x', 'img_y', 'megapixels', 'occurrence_url',
-  'image_url', 'source', 'downloaded_at',
+  'state_province', 'event_date', 'filename', 'img_x', 'img_y', 'megapixels',
+  'occurrence_url', 'image_url', 'source', 'downloaded_at',
 ];
 
 function upsertImage(dbFile, row) {
@@ -100,7 +109,7 @@ function schema(dbFile) {
 // the term is only ever a bound parameter, never interpolated into SQL).
 const SEARCH_COLS = [
   'gbif_id', 'herb_code', 'dwc_order', 'family', 'genus', 'specific_epithet',
-  'fullname', 'scientific_name', 'country', 'filename',
+  'fullname', 'scientific_name', 'country', 'event_date', 'filename',
 ];
 
 // Paginated + optionally filtered rows, newest first. Returns { rows, total,

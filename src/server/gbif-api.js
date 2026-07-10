@@ -148,6 +148,7 @@ async function buildMeta(occ, { resolvePublisher: doResolve = false } = {}) {
     continent: occ.continent || null,
     country: occ.country || null,
     state_province: occ.stateProvince || null,
+    event_date: occ.eventDate || null,
     occurrence_url: `${OCC_WEB}/${id}`,
   };
 }

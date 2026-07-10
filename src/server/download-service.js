@@ -51,6 +51,7 @@ async function saveOne({ parentDir, occ, publisher, imageBuffer }) {
     continent: occ.continent || null,
     country: occ.country || null,
     state_province: occ.stateProvince || null,
+    event_date: occ.eventDate || null,
     filename: fn.filenameJpg,
     img_x: prepared.width,
     img_y: prepared.height,

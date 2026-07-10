@@ -112,17 +112,25 @@
         <div id="vw-schema" class="vw-schemabar"></div>
 
         <div class="vw-body">
+          <!-- 20% — stacked row buttons (gbifId · fullname) + pager -->
           <div class="vw-list-col">
             <div id="vw-list" class="vw-list"></div>
             <div id="vw-pager" class="vw-pager">
-              <button id="vw-prev" class="btn ghost" disabled>‹ PREV</button>
+              <button id="vw-prev" class="btn ghost" disabled title="Previous page">‹</button>
               <span id="vw-pageinfo" class="vw-pageinfo mono"></span>
-              <button id="vw-next" class="btn ghost" disabled>NEXT ›</button>
+              <button id="vw-next" class="btn ghost" disabled title="Next page">›</button>
             </div>
           </div>
+          <!-- 50% — JSON of the selected row -->
+          <div class="vw-json-col">
+            <div id="vw-json" class="vw-json"></div>
+          </div>
+          <!-- 30% — image preview (click to zoom) -->
           <div id="vw-image" class="vw-image">
-            <div id="vw-image-empty" class="vw-image-empty">◇ select an item to preview its image</div>
-            <img id="vw-image-img" class="vw-image-img" hidden alt="" />
+            <div class="vw-image-stage" id="vw-image-stage">
+              <div id="vw-image-empty" class="vw-image-empty">◇ select an item to preview its image</div>
+              <img id="vw-image-img" class="vw-image-img" hidden alt="" title="Click to zoom" />
+            </div>
             <div id="vw-image-cap" class="vw-image-cap mono"></div>
           </div>
         </div>
