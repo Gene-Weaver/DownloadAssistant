@@ -125,7 +125,9 @@
       els.imgEmpty.hidden = true;
       els.img.hidden = false;
       els.img.src = opts.dataUrl;
-      els.imgCap.textContent = `${opts.filename || ''}  ${opts.width}×${opts.height}`.trim();
+      // Report the STORED image's megapixels (not the downsized preview's pixels).
+      const mp = (opts.megapixels != null && opts.megapixels !== '') ? `${opts.megapixels} MP` : '';
+      els.imgCap.textContent = `${opts.filename || ''}${mp ? '  ·  ' + mp : ''}`.trim();
       return;
     }
     els.img.hidden = true; els.img.removeAttribute('src'); els.imgCap.textContent = '';
@@ -156,8 +158,10 @@
     let res = null;
     try { res = await resolveImage(rec, 1400); } catch (_) { /* handled below */ }
     if (token !== state.imgToken) return; // superseded
-    if (res && res.dataUrl) setImageState('image', res);
-    else setImageState('missing', { msg: state.src === 'dwc' ? 'not downloaded yet' : 'image file missing' });
+    if (res && res.dataUrl) {
+      const megapixels = state.src === 'db' ? rec.megapixels : res.megapixels;
+      setImageState('image', { ...res, megapixels });
+    } else setImageState('missing', { msg: state.src === 'dwc' ? 'not downloaded yet' : 'image file missing' });
   }
 
   // --- lightbox (zoom + pan + prev/next) -----------------------------------
@@ -235,7 +239,8 @@
     if (res && res.dataUrl) {
       lb.img.hidden = false;
       lb.img.src = res.dataUrl;
-      lb.cap.textContent = `${res.filename || rowLabel(rec)}  ${res.width}×${res.height}`;
+      const mp = state.src === 'db' ? rec.megapixels : res.megapixels;
+      lb.cap.textContent = `${res.filename || rowLabel(rec)}${mp != null && mp !== '' ? `  ·  ${mp} MP` : ''}`;
     } else {
       lb.img.hidden = true;
       lb.cap.textContent = `${state.src === 'dwc' ? 'not downloaded yet' : 'image file missing'} — ${rowLabel(rec)}`;

@@ -70,12 +70,13 @@ function pushProgress(parentDir, key) { push('gbif:jobProgress', snapshot(parent
 
 // Live per-worker board (throttled). job.workers[i] = { current, prev }.
 let lastWorkersPush = 0;
+let workersTrailing = null;
 function pushWorkers(key, force) {
   const now = Date.now();
-  if (!force && now - lastWorkersPush < 300) return;
-  lastWorkersPush = now;
-  const job = jobs.get(key) || {};
-  push('gbif:workers', { key, count: DRAIN_GLOBAL, workers: job.workers || [] });
+  const emit = () => { lastWorkersPush = Date.now(); const job = jobs.get(key) || {}; push('gbif:workers', { key, count: job.workerCount || DRAIN_GLOBAL, workers: job.workers || [] }); };
+  if (force || now - lastWorkersPush >= 120) { if (workersTrailing) { clearTimeout(workersTrailing); workersTrailing = null; } emit(); return; }
+  // trailing edge so the latest state always lands even under a burst
+  if (!workersTrailing) workersTrailing = setTimeout(() => { workersTrailing = null; emit(); }, 120 - (now - lastWorkersPush));
 }
 
 // --- submit ---------------------------------------------------------------

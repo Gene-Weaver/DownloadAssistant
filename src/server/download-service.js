@@ -35,7 +35,9 @@ async function saveOne({ parentDir, occ, publisher, imageBuffer, imageUrl }) {
 
   const fn = generateImageFilename(occ, publisher);
   const outPath = path.join(paths.images, fn.filenameJpg);
-  fs.writeFileSync(outPath, prepared.buffer);
+  // Async write — a synchronous 5 MB write blocks the whole event loop, which
+  // serializes all the concurrent workers (they'd appear to move in lockstep).
+  await fs.promises.writeFile(outPath, prepared.buffer);
 
   const row = {
     gbif_id: gbifId,

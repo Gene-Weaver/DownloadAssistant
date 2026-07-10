@@ -33,8 +33,10 @@ function fetchError(kind, outcome, status, message) {
 
 // HTTP status -> classification.
 function classify(status) {
-  if (status === 410) return 'broken';
-  if ([401, 403, 404, 429, 503].includes(status)) return 'blocked'; // 404 ambiguous → let the webview try
+  // 404/410 = the file isn't there. The webview hits the SAME url and 404s too,
+  // so treat it as broken (never retry) — e.g. BRY's ~320k dead *_lg.jpg urls.
+  if (status === 410 || status === 404) return 'broken';
+  if ([401, 403, 429, 503].includes(status)) return 'blocked';
   return 'transient'; // other 4xx/5xx
 }
 
@@ -57,7 +59,7 @@ async function tryDirect(url) {
       throw fetchError('transient', 'error', null, code || (e && e.message) || 'network error');
     }
     if (!res.ok) {
-      const outcome = [401, 403, 429, 503].includes(res.status) ? 'blocked' : (res.status === 410 ? 'broken' : 'http_error');
+      const outcome = [401, 403, 429, 503].includes(res.status) ? 'blocked' : ((res.status === 410 || res.status === 404) ? 'broken' : 'http_error');
       throw fetchError(classify(res.status), outcome, res.status, `http ${res.status}`);
     }
     const ct = (res.headers.get('content-type') || '').toLowerCase();

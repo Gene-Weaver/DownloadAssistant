@@ -411,11 +411,11 @@ html, body {
 .wk-idle { color: var(--green-line); }
 .wk-delayrow { min-height: 12px; }
 .wk-delay { color: #3a4a40; }              /* dimmed when not active */
-.wk-delay.on { color: var(--red); text-shadow: 0 0 5px rgba(255,59,78,0.5); font-weight: 700; }
+.wk-delay.on { color: var(--amber); text-shadow: 0 0 5px rgba(255,180,84,0.5); font-weight: 700; } /* orange when resting */
 .wk-hr { border-top: 1px dashed var(--green-line); margin: 3px 0; }
 .wk-prevstatus { min-height: 12px; }
 .wk-ok { color: var(--green); }
-.wk-fail { color: var(--red); }
+.wk-fail { color: var(--red); font-weight: 700; }
 .wk-previtem { color: var(--muted); }
 .job-head { display: flex; align-items: center; gap: 12px; color: var(--green); letter-spacing: 0.5px; }
 .job-phase { flex: 1; }
@@ -626,6 +626,8 @@ html, body {
 
 /* stacked selectable row buttons (gbifId · fullname) */
 .vw-row-btn {
+  flex: none;            /* CRITICAL: don't let the flex column squish rows to
+                            slivers — keep each row's natural height + scroll */
   display: block;
   width: 100%;
   text-align: left;
@@ -634,12 +636,12 @@ html, body {
   border-radius: 2px;
   color: var(--green-soft);
   font-family: var(--mono);
-  font-size: 11.5px;
-  padding: 6px 8px;
+  font-size: 12px;
+  line-height: 1.35;
+  padding: 6px 9px;
   cursor: pointer;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  white-space: normal;   /* wrap long gbifID · fullname labels so they're readable */
+  overflow-wrap: anywhere;
 }
 .vw-row-btn:hover { background: rgba(51, 255, 102, 0.07); color: var(--green); }
 .vw-row-btn.selected {

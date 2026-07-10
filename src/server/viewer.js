@@ -123,7 +123,8 @@ async function imageByGbifId(dbFile, imagesDir, gbifId, maxDim = 1400) {
   const row = db.getRow(dbFile, gbifId);
   if (!row || !row.filename) return null; // not downloaded / no image on disk
   const r = await imageByFilename(imagesDir, row.filename, maxDim);
-  return r ? { ...r, filename: row.filename } : null;
+  // carry the STORED (full-res) megapixels + dims from the index, not the preview
+  return r ? { ...r, filename: row.filename, megapixels: row.megapixels, img_x: row.img_x, img_y: row.img_y } : null;
 }
 
 module.exports = { listDwc, readDwcCsv, imageToDataUrl, imageByFilename, imageByGbifId };
