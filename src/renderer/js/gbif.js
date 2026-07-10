@@ -43,6 +43,11 @@
     if (ct.indexOf('image/') === 0) return { state: 'image', ct };
     const t = (document.title || '').toLowerCase();
     const html = (document.documentElement ? document.documentElement.innerHTML : '').slice(0, 8000);
+    // BANNED = an outright block (rate-limit / IP ban) with nothing to solve. Waiting
+    // won't help and hammering extends it — so back off, don't treat it as a challenge.
+    const banned = /sorry, you have been blocked|you have been (temporarily )?blocked|you are unable to access|error 101[0-9]|error 1006|error 1007|error 1008|blocked by the (site|website)|access denied/i.test(t + ' ' + html)
+      && !/cf-turnstile|challenges\\.cloudflare\\.com/i.test(html);
+    if (banned) return { state: 'banned', ct };
     // INTERACTIVE = a Turnstile widget that needs a human click (the mnhn case).
     // The challenge-stage / "just a moment" markers are used by the NON-interactive
     // JS challenge too, so they must NOT count as interactive.
@@ -74,7 +79,14 @@
     // rotation). cfGated: hosts awaiting a one-time human solve. cfSample: a sample
     // blocked image_url per gated host to open in the visible webview for solving.
     cfCleared: new Map(), cfGated: new Set(), cfSample: new Map(), cfSolving: null,
+    // Hosts that outright BLOCKED us (mnhn "temporarily banned"): back off a long
+    // while (cfBanned: host->untilTs), then fetch them GENTLY (cfGentle) — spaced by
+    // cfHostLast — so we wait the ban out and don't re-trigger it. Not IP evasion:
+    // just a polite client the server stops blocking.
+    cfBanned: new Map(), cfGentle: new Set(), cfHostLast: new Map(),
   };
+  const BAN_COOLDOWN_MS = 30 * 60 * 1000; // 30 min — wait out a temporary block
+  const GENTLE_INTERVAL_MS = 5000;        // ≥5s between requests to a recovered host
 
   const hostOf = (u) => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch (_) { return ''; } };
 
@@ -174,6 +186,7 @@
         try { p = await fw.executeJavaScript(CF_PROBE, true); } catch (_) { return; }
         if (!p || settled) return;
         if (p.state === 'image' || p.state === 'html') { if (poll) { clearInterval(poll); poll = null; } readImage(); return; }
+        if (p.state === 'banned') { const e = new Error('cloudflare-banned'); e.banned = true; finish(reject, e); return; }
         if (p.state === 'interactive') { const e = new Error('cloudflare-interactive'); e.cf = true; e.interactive = true; finish(reject, e); return; }
         // 'challenge' → keep polling; the guest runs CF's JS and reloads to the image.
       };
@@ -244,6 +257,13 @@
         trail.push({ method: t.method, outcome: 'success' });
         return { dataUrl, method: t.method, trail };
       } catch (e) {
+        if (e && e.banned) {
+          // Outright block/rate-limit (mnhn "temporarily banned"). Nothing to solve
+          // and retrying extends it — surface so the drain rests the host.
+          const err = new Error('host-banned'); err.kind = 'banned'; err.host = host;
+          err.trail = trail.concat([{ method: t.method, outcome: 'banned' }]);
+          throw err;
+        }
         if (e && e.cf) {
           // Cloudflare wall. Don't waste the other UA tiers — surface it so the
           // drain parks the row and asks the user to solve it once.
@@ -664,6 +684,13 @@
         }
         idle = 0;
         const ihost = hostOf(it.image_url);
+        const now = Date.now();
+        // Host that BLOCKED us: rest until the cooldown lifts (hammering extends the
+        // ban). Park the row and move on.
+        if ((state.cfBanned.get(ihost) || 0) > now) {
+          try { await api.gbif.requeueBlocked(key, it.gbif_id); } catch (_) {}
+          setIdle(w); await sleep(2000); continue;
+        }
         // Host awaiting a one-time human Cloudflare solve: park the row (back to
         // blocked) and skip so we don't hammer the wall; it flows once cleared.
         if (state.cfGated.has(ihost) && !state.cfCleared.has(ihost)) {
@@ -671,6 +698,13 @@
           try { await api.gbif.requeueBlocked(key, it.gbif_id); } catch (_) {}
           setIdle(w); await sleep(1500); continue;
         }
+        // Recovered-from-ban host: fetch GENTLY — space requests ≥GENTLE_INTERVAL so
+        // one slot trickles it out and we don't earn another block.
+        if (state.cfGentle.has(ihost) && now - (state.cfHostLast.get(ihost) || 0) < GENTLE_INTERVAL_MS) {
+          try { await api.gbif.requeueBlocked(key, it.gbif_id); } catch (_) {}
+          setIdle(w); await sleep(1000); continue;
+        }
+        state.cfHostLast.set(ihost, now);
         state.webviewWorkers[w] = { current: { gbif_id: it.gbif_id, herbCode: it.herbCode, method: state.cfCleared.has(ihost) ? 'webview-cf' : 'webview-electron', delayActive: false }, prev: (state.webviewWorkers[w] || {}).prev };
         renderWorkers();
         let ok = false;
@@ -679,6 +713,16 @@
           await api.gbif.saveBlocked(key, it.gbif_id, r.dataUrl, r.method, r.trail);
           ok = true;
         } catch (e) {
+          if (e && e.kind === 'banned') {
+            // Outright block/rate-limit. Rest the host 30 min, then fetch it gently.
+            // Park the row (resumable) and stop hammering — the ban lifts on its own.
+            state.cfBanned.set(ihost, Date.now() + BAN_COOLDOWN_MS);
+            state.cfGentle.add(ihost);
+            try { await api.gbif.requeueBlocked(key, it.gbif_id); } catch (_) {}
+            setStatus(`${ihost} temporarily blocked you — resting 30 min, then retrying gently`, 'error');
+            toast(`${ihost} blocked us (rate limit). Backing off 30 min; it'll retry slowly.`, 'error');
+            setIdle(w); continue;
+          }
           if (e && e.kind === 'cf') {
             // Cloudflare wall → mark the host gated, stash a sample URL, park the row
             // (NOT a failure — it's resumable), and prompt a one-time solve.
