@@ -18,6 +18,7 @@ const auth = require('./auth');
 const paths = require('../server/paths');
 const db = require('../server/db');
 const api = require('../server/gbif-download-api');
+const gbifApi = require('../server/gbif-api');
 const predicate = require('../server/predicate-builder');
 const dwca = require('../server/dwca');
 const imageFetch = require('../server/image-fetch');
@@ -38,7 +39,29 @@ function dbFileFor(parentDir) { return path.join(paths.resolvePaths(parentDir).d
 
 function snapshot(parentDir, key) {
   const dbFile = dbFileFor(parentDir);
-  return { ...db.getDownload(dbFile, key), counts: db.queueCounts(dbFile, key) };
+  const row = db.getDownload(dbFile, key);
+  const counts = db.queueCounts(dbFile, key);
+  const job = jobs.get(key) || {};
+  const archiveTerminal = row && ['EXTRACTED', 'DONE', 'FAILED', 'KILLED', 'CANCELLED', 'FILE_ERASED'].includes(row.status);
+  const busy = !!(row && (!archiveTerminal || job.enumerating || counts.pending || counts.in_progress || counts.blocked));
+  return { ...row, counts, enumerating: !!job.enumerating, busy };
+}
+
+// Build the compact, saveOne-shaped occ from a live search result (same shape
+// as dwca.compactOcc) so the image stage needs zero per-record API calls.
+function compactOccFromSearch(occ) {
+  const id = String(occ.key);
+  return {
+    key: id, gbifID: id,
+    institutionCode: occ.institutionCode || null, institutionID: occ.institutionID || null,
+    ownerInstitutionCode: occ.ownerInstitutionCode || null, collectionCode: occ.collectionCode || null,
+    occurrenceID: occ.occurrenceID || null, order: occ.order || null, family: occ.family || null,
+    genus: occ.genus || null, specificEpithet: occ.specificEpithet || null, scientificName: occ.scientificName || null,
+    decimalLatitude: occ.decimalLatitude != null ? occ.decimalLatitude : null,
+    decimalLongitude: occ.decimalLongitude != null ? occ.decimalLongitude : null,
+    continent: occ.continent || null, country: occ.country || null, stateProvince: occ.stateProvince || null,
+    eventDate: occ.eventDate || null, publishingOrgKey: occ.publishingOrgKey || null,
+  };
 }
 function pushProgress(parentDir, key) { push('gbif:jobProgress', snapshot(parentDir, key)); }
 
@@ -60,9 +83,40 @@ async function submit(searchUrl) {
     predicate_json: JSON.stringify(body.predicate), status: st.status || 'PREPARING',
     total_records: st.totalRecords || null, license: st.license || null, download_link: st.downloadLink || null,
   });
-  startPoll(parentDir, key);
+  startPoll(parentDir, key);              // Track A: archive + DOI (async, ~minutes–hours)
+  startImmediateEnumerate(parentDir, key, searchUrl); // Track B: images NOW (don't await)
   pushProgress(parentDir, key);
   return { key, doi: st.doi || null, slug };
+}
+
+// Track B: enumerate gbifIDs + image URLs from the search API RIGHT NOW (facet
+// partitioning to get past the offset wall) and drain images immediately, in
+// parallel with the archive build. Any records this misses are topped up when
+// the archive lands.
+async function startImmediateEnumerate(parentDir, key, searchUrl) {
+  const job = jobs.get(key) || {}; job.parentDir = parentDir; jobs.set(key, job);
+  if (job.enumerating) return;
+  job.enumerating = true;
+  const dbFile = dbFileFor(parentDir);
+  startDrain(parentDir, key); // begin draining as soon as rows appear
+  try {
+    await gbifApi.enumerateAll(searchUrl, {
+      isCancelled: () => job.cancelled,
+      onBatch: async (rows) => {
+        const batch = rows.map(({ occ, image_url }) => ({
+          gbif_id: String(occ.key), download_key: key, image_url,
+          host: imageFetch.hostOf(image_url), occ_json: JSON.stringify(compactOccFromSearch(occ)),
+        }));
+        db.enqueue(dbFile, batch);
+        db.markSkippedAlreadyDownloaded(dbFile, key);
+        startDrain(parentDir, key); // (no-op if already draining)
+        pushProgress(parentDir, key);
+      },
+    });
+  } catch (_) { /* best-effort; the archive tops up */ }
+  job.enumerating = false;
+  startDrain(parentDir, key);
+  pushProgress(parentDir, key);
 }
 
 // --- poll -----------------------------------------------------------------
@@ -135,16 +189,23 @@ async function handleSucceeded(parentDir, key, st) {
   });
   flush();
   db.markSkippedAlreadyDownloaded(dbFile, key);
-  db.updateDownload(dbFile, key, { status: 'QUEUED', citation, completed_at: new Date().toISOString() });
+  // EXTRACTED = archive done + DOI/files written; images may still be draining
+  // (Track B started them immediately). Top-up rows are picked up by the drain.
+  db.updateDownload(dbFile, key, { status: 'EXTRACTED', citation, completed_at: new Date().toISOString() });
   pushProgress(parentDir, key);
   startDrain(parentDir, key);
+  checkComplete(parentDir, key);
 }
 
 // --- image drain: tier-1 headless direct fetch ----------------------------
+// DONE only once BOTH tracks finish: the archive is extracted, enumeration has
+// stopped, and every queued image is settled.
 function checkComplete(parentDir, key) {
   const dbFile = dbFileFor(parentDir);
+  const job = jobs.get(key) || {};
+  const row = db.getDownload(dbFile, key);
   const c = db.queueCounts(dbFile, key);
-  if (c.pending === 0 && c.in_progress === 0 && c.blocked === 0) {
+  if (row && row.status === 'EXTRACTED' && !job.enumerating && c.pending === 0 && c.in_progress === 0 && c.blocked === 0) {
     db.updateDownload(dbFile, key, { status: 'DONE' });
   }
 }
@@ -156,10 +217,11 @@ async function startDrain(parentDir, key) {
   const dbFile = dbFileFor(parentDir);
   db.resetInProgress(dbFile);
 
-  // Repeat passes until nothing is pending (retried rows re-enter as pending).
+  // Keep draining while rows exist OR enumeration is still feeding the queue.
   while (!job.cancelled) {
     const c = db.queueCounts(dbFile, key);
-    if (c.pending === 0 && c.in_progress === 0) break;
+    if (c.pending === 0 && c.in_progress === 0 && !job.enumerating) break;
+    if (c.pending === 0) { await sleep(400); continue; } // wait for enumerate/archive to add rows
     await drainPass(parentDir, key, job);
   }
 
@@ -280,16 +342,18 @@ async function resumeOnStartup() {
   db.resetInProgress(dbFile);
   for (const row of active) {
     const st = row.status;
-    if (['PREPARING', 'RUNNING'].includes(st)) startPoll(parentDir, row.key);
-    else if (['SUCCEEDED', 'DOWNLOADING_ZIP', 'PARSING'].includes(st)) {
+    if (['PREPARING', 'RUNNING'].includes(st)) {
+      startPoll(parentDir, row.key); // Track A resumes
+      if (row.source_url) startImmediateEnumerate(parentDir, row.key, row.source_url); // Track B resumes
+    } else if (['SUCCEEDED', 'DOWNLOADING_ZIP', 'PARSING'].includes(st)) {
       try {
         const s = await api.pollDownload(row.key);
         if (s.status === 'SUCCEEDED') handleSucceeded(parentDir, row.key, s);
         else if (s.status === 'FILE_ERASED') db.updateDownload(dbFile, row.key, { status: 'FILE_ERASED' });
         else startPoll(parentDir, row.key);
       } catch (_) { /* offline; will retry next launch */ }
-    } else if (st === 'QUEUED') {
-      startDrain(parentDir, row.key);
+    } else if (['EXTRACTED', 'QUEUED'].includes(st)) {
+      startDrain(parentDir, row.key); // archive done; finish the image queue
     }
   }
   push('gbif:jobsActive', active.map((r) => r.key));

@@ -268,6 +268,81 @@ async function enumerateSearch(searchUrl, { onProgress } = {}) {
   return { total, occurrences: out, capped, slug, api_url };
 }
 
+// --- facet-partition enumeration (get ALL ids+urls past the offset wall) ---
+// Login-free way to enumerate every imaged occurrence: recursively split the
+// search by a facet (datasetKey → year → month) until each leaf is under the
+// deep-pagination wall, then offset-page each leaf and harvest gbifID + the
+// image URL that already rides along in each result's media[]. datasetKey first
+// (every record has one → no null-residual gap). Any stragglers are topped up
+// later by the authoritative DWCA download.
+const WALL_SAFE = 9000; // keep each leaf comfortably under the ~10k wall
+const FACET_FIELDS = [
+  { facet: 'DATASET_KEY', param: 'datasetKey' },
+  { facet: 'YEAR', param: 'year' },
+  { facet: 'MONTH', param: 'month' },
+];
+
+function addParam(url, param, value) {
+  const u = new URL(url);
+  u.searchParams.set(param, String(value));
+  return u.toString();
+}
+
+async function facetCounts(searchUrl, field) {
+  const api = new URL(buildSearchApiUrl(searchUrl, { limit: 0, offset: 0 }));
+  api.searchParams.set('limit', '0');
+  api.searchParams.set('facet', field);
+  api.searchParams.set('facetLimit', '1200');
+  api.searchParams.set('facetMincount', '1');
+  const page = await fetchJson(api.toString());
+  const f = (page.facets || []).find((x) => x.field === field);
+  return { total: page.count || 0, counts: f ? f.counts.map((c) => ({ value: c.name, count: c.count })) : [] };
+}
+
+async function enumerateAll(searchUrl, { onBatch, onProgress, isCancelled = () => false } = {}) {
+  if (!/^https?:\/\//i.test(String(searchUrl || ''))) throw new Error('Open a GBIF search first.');
+  let harvested = 0;
+
+  const emit = async (results) => {
+    const rows = [];
+    for (const occ of (results || [])) {
+      const img = pickImageUrl(occ);
+      if (img) rows.push({ occ, image_url: img });
+    }
+    if (rows.length) { harvested += rows.length; if (onBatch) await onBatch(rows); if (onProgress) onProgress(harvested); }
+  };
+
+  const pageLeaf = async (url, count) => {
+    const offsets = [];
+    for (let off = 0; off < Math.min(count, 100000); off += ENUM_PAGE) offsets.push(off);
+    let idx = 0;
+    const worker = async () => {
+      while (idx < offsets.length && !isCancelled()) {
+        const off = offsets[idx++];
+        try { const page = await fetchJson(buildSearchApiUrl(url, { limit: ENUM_PAGE, offset: off }), ENUM_PAGE_TIMEOUT_MS); await emit(page.results); }
+        catch (_) { /* skip a failed page */ }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(ENUM_CONCURRENCY, offsets.length) }, worker));
+  };
+
+  const partition = async (url, depth) => {
+    if (isCancelled()) return;
+    let count = 0;
+    try { count = (await fetchJson(buildSearchApiUrl(url, { limit: 0, offset: 0 }))).count || 0; } catch (_) { return; }
+    if (!count) return;
+    if (count <= WALL_SAFE || depth >= FACET_FIELDS.length) { await pageLeaf(url, count); return; }
+    const field = FACET_FIELDS[depth];
+    let counts = [];
+    try { ({ counts } = await facetCounts(url, field.facet)); } catch (_) { /* fall through */ }
+    if (!counts.length) { await pageLeaf(url, count); return; }
+    for (const c of counts) { if (isCancelled()) return; await partition(addParam(url, field.param, c.value), depth + 1); }
+  };
+
+  await partition(searchUrl, 0);
+  return { harvested };
+}
+
 // --- Darwin Core file output ---------------------------------------------
 
 function sanitizeSlug(s) {
@@ -381,6 +456,7 @@ module.exports = {
   resolvePublisher,
   buildMeta,
   enumerateSearch,
+  enumerateAll,
   writeDwc,
   deriveSlug,
   _buildSearchApiUrl: buildSearchApiUrl, // test seam

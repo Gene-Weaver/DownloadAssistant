@@ -461,15 +461,18 @@
   }
 
   // --- bulk-download job card ---------------------------------------------
+  // The phase line reflects the ARCHIVE track (DOI); images (Track B) run in
+  // parallel and show on their own line — they don't wait for the archive.
   function jobPhaseLabel(status) {
     switch (status) {
-      case 'PREPARING': return '◐ GBIF is preparing the archive…';
-      case 'RUNNING': return '◑ GBIF is building the archive…';
-      case 'DOWNLOADING_ZIP': return '⤓ downloading Darwin Core archive…';
-      case 'PARSING': return '⚙ reading Darwin Core…';
+      case 'PREPARING': return '◐ GBIF preparing archive (DOI)…';
+      case 'RUNNING': return '◑ GBIF building archive (DOI)…';
+      case 'DOWNLOADING_ZIP': return '⤓ downloading archive…';
+      case 'PARSING': return '⚙ reading archive…';
+      case 'EXTRACTED': return '▓ archive + DOI ready';
+      case 'DONE': return '▓ complete';
       case 'QUEUED': return '▚ acquiring images…';
-      case 'DONE': return '▓ download complete';
-      case 'FAILED': return '✗ download failed';
+      case 'FAILED': return '✗ archive failed (images still downloading)';
       case 'KILLED': case 'CANCELLED': return '✗ cancelled';
       case 'FILE_ERASED': return '✗ archive expired on GBIF — re-request';
       default: return status || '';
@@ -482,26 +485,26 @@
     if (!snap || !snap.key) { el.hidden = true; return; }
     el.hidden = false;
     const c = snap.counts || {};
-    const imaging = snap.status === 'QUEUED' || snap.status === 'DONE';
+    const target = snap.total_records || c.total || 0;
     const total = snap.total_records != null ? `${Number(snap.total_records).toLocaleString()} records` : '';
     const doi = snap.doi ? `<span class="job-doi" data-doi="${esc(snap.doi)}" title="Open DOI">DOI ${esc(snap.doi)}</span>` : '';
+    const hasImages = (c.total || 0) > 0;
     const settled = (c.done || 0) + (c.skipped || 0) + (c.failed || 0);
-    const pct = imaging && c.total ? Math.round((settled / c.total) * 100) : null;
-    const imgLine = imaging
-      ? `<div class="job-sub mono">images: ${c.done || 0}/${c.total || 0}${c.blocked ? ` · ${c.blocked} via browser` : ''}${c.failed ? ` · ${c.failed} failed` : ''}${c.skipped ? ` · ${c.skipped} already had` : ''}</div>`
-      : '';
+    const pct = target ? Math.min(100, Math.round((settled / target) * 100)) : null;
+    const imgLine = hasImages
+      ? `<div class="job-sub mono">images ${c.done || 0}/${target}${snap.enumerating ? ' (finding more…)' : ''}${c.blocked ? ` · ${c.blocked} via browser` : ''}${c.failed ? ` · ${c.failed} failed` : ''}${c.skipped ? ` · ${c.skipped} already had` : ''}</div>`
+      : (snap.enumerating ? '<div class="job-sub mono">finding images…</div>' : '');
+    const done = snap.busy === false;
     el.innerHTML = `
       <div class="job-head mono">
         <span class="job-phase">${esc(jobPhaseLabel(snap.status))}</span>
         <span class="job-meta">${total} ${doi}</span>
-        <button class="btn ghost sm" id="gbif-job-close">${snap.status === 'DONE' ? '✕ CLOSE' : '✕ CANCEL'}</button>
+        <button class="btn ghost sm" id="gbif-job-close">${done ? '✕ CLOSE' : '✕ CANCEL'}</button>
       </div>
-      ${pct != null ? `<div class="gbif-progress-track"><div class="gbif-progress-fill" style="width:${pct}%"></div></div>` : ''}
+      ${pct != null && hasImages ? `<div class="gbif-progress-track"><div class="gbif-progress-fill" style="width:${pct}%"></div></div>` : ''}
       ${imgLine}`;
     const btn = el.querySelector('#gbif-job-close');
-    if (btn) btn.addEventListener('click', () => {
-      if (snap.status === 'DONE') el.hidden = true; else api.gbif.cancelJob(snap.key);
-    });
+    if (btn) btn.addEventListener('click', () => { if (done) el.hidden = true; else api.gbif.cancelJob(snap.key); });
     const doiEl = el.querySelector('.job-doi');
     if (doiEl) doiEl.addEventListener('click', () => { try { window.open(`https://doi.org/${snap.doi}`); } catch (_) {} });
   }
