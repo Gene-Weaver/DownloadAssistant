@@ -334,6 +334,26 @@ function logFetchBatch(dbFile, entries) {
   tx(entries);
 }
 
+// Paginated + searchable raw fetch_log (most recent first). onlyFailures hides
+// the 'success' rows.
+function fetchLog(dbFile, { limit = 100, offset = 0, search = '', onlyFailures = false } = {}) {
+  const db = open(dbFile);
+  const lim = Math.min(Math.max(1, limit | 0), 500);
+  const off = Math.max(0, offset | 0);
+  const clauses = [];
+  const params = [];
+  if (onlyFailures) clauses.push("outcome != 'success'");
+  const term = String(search || '').trim();
+  if (term) {
+    clauses.push('(host LIKE ? OR gbif_id LIKE ? OR method LIKE ? OR outcome LIKE ?)');
+    params.push(`%${term}%`, `%${term}%`, `%${term}%`, `%${term}%`);
+  }
+  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+  const total = db.prepare(`SELECT COUNT(*) AS n FROM fetch_log ${where}`).get(...params).n;
+  const rows = db.prepare(`SELECT * FROM fetch_log ${where} ORDER BY id DESC LIMIT ? OFFSET ?`).all(...params, lim, off);
+  return { rows, total, limit: lim, offset: off };
+}
+
 // Per-domain fetch analytics: attempts + successes + block/broken/fail counts,
 // and which method won most for each host. For a future Viewer "diagnostics" view.
 function fetchStats(dbFile) {
@@ -365,5 +385,5 @@ module.exports = {
   insertDownload, updateDownload, getDownload, listDownloads, getActiveDownloads,
   enqueue, markSkippedAlreadyDownloaded, nextQueueBatch, setQueueStatus,
   bumpQueueAttempt, queueCounts, resetInProgress,
-  setQueueOutcome, logFetch, logFetchBatch, fetchStats,
+  setQueueOutcome, logFetch, logFetchBatch, fetchStats, fetchLog,
 };

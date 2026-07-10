@@ -19,7 +19,7 @@
     src: 'db', folder: null, file: 'occurrence.csv', search: '',
     page: 0, pageSize: 100, total: 0,
     parentReady: false, mounted: false, imgToken: 0,
-    rows: [], selectedIndex: -1, folders: [],
+    rows: [], selectedIndex: -1, folders: [], onlyFailures: true,
   };
   const els = {};
   let searchTimer = null;
@@ -71,6 +71,9 @@
   function rowLabel(rec) {
     if (state.src === 'db') {
       return `${rec.gbif_id != null ? rec.gbif_id : '?'} · ${rec.fullname || rec.scientific_name || ''}`.trim();
+    }
+    if (state.src === 'log') {
+      return `${rec.host || '?'} · ${rec.outcome || ''}${rec.http_status ? ` ${rec.http_status}` : ''}`;
     }
     const id = rec.gbifID || rec.gbif_id || '?';
     if (state.file === 'multimedia.csv') return `${id} · ${rec.type || rec.format || 'media'}`;
@@ -286,6 +289,7 @@
 
   async function loadDb() {
     els.folder.hidden = true; els.file.hidden = true; els.schema.hidden = false;
+    if (els.failOnly) els.failOnly.hidden = true;
     try { const info = await api.viewer.dbSchema(); renderSchema(info.columns, info.rowCount); }
     catch (_) { els.schema.innerHTML = ''; }
     await loadDbRows();
@@ -302,6 +306,7 @@
   async function loadDwc(reloadFolders) {
     els.schema.hidden = true; els.schema.innerHTML = '';
     els.folder.hidden = false; els.file.hidden = false;
+    if (els.failOnly) els.failOnly.hidden = true;
     if (reloadFolders) {
       const folders = await api.viewer.listDwc();
       state.folders = folders;
@@ -341,7 +346,48 @@
     els.count.textContent = `${res.total} row(s) · ${state.file}`;
     setPager(res.offset, res.rows.length, res.total);
   }
-  function reloadRows() { if (state.src === 'db') loadDbRows(); else loadDwcRows(); }
+  // --- FETCH LOG (failure analytics) --------------------------------------
+  async function loadFetchLog() {
+    els.folder.hidden = true; els.file.hidden = true;
+    els.schema.hidden = false;
+    if (els.failOnly) els.failOnly.hidden = false;
+    try { renderFetchSummary(await api.viewer.fetchStats()); }
+    catch (_) { els.schema.innerHTML = ''; }
+    await loadFetchLogRows();
+  }
+
+  // Per-domain trend strip: which hosts bot-block / break / fail, and the UA that
+  // wins for each (from the winners aggregate).
+  function renderFetchSummary(stats) {
+    const byHost = (stats && stats.byHost) || [];
+    if (!byHost.length) { els.schema.innerHTML = '<span class="vw-schema-title">FETCH LOG — no attempts recorded yet</span>'; return; }
+    const totalAtt = byHost.reduce((a, h) => a + (h.attempts || 0), 0);
+    const win = {};
+    for (const w of ((stats && stats.winners) || [])) { if (!win[w.host]) win[w.host] = w.method; }
+    const sorted = byHost.slice().sort((a, b) =>
+      ((b.blocked + b.broken + b.failed) - (a.blocked + a.broken + a.failed)) || (b.attempts - a.attempts));
+    const chips = sorted.slice(0, 50).map((h) => {
+      const bad = (h.blocked || 0) + (h.broken || 0) + (h.failed || 0);
+      const title = win[h.host] ? `wins via ${win[h.host]}` : '';
+      return `<span class="vw-schema-chip${bad ? ' bad' : ''}" title="${esc(title)}"><b>${esc(h.host)}</b> ${h.ok || 0}✓${h.blocked ? ` ${h.blocked}⊘` : ''}${h.broken ? ` ${h.broken}✗` : ''}${h.failed ? ` ${h.failed}⚠` : ''}</span>`;
+    }).join('');
+    els.schema.innerHTML = `<span class="vw-schema-title">FETCH LOG · ${totalAtt.toLocaleString()} attempts · ${byHost.length} hosts · ✓ok ⊘blocked ✗broken ⚠failed</span>${chips}`;
+  }
+
+  async function loadFetchLogRows() {
+    const res = await api.viewer.fetchLog({ limit: state.pageSize, offset: state.page * state.pageSize, search: state.search, onlyFailures: state.onlyFailures });
+    state.total = res.total;
+    if (!res.rows.length) renderEmpty(state.onlyFailures ? '— no failures logged —' : '— no fetch attempts logged —');
+    else renderRows(res.rows);
+    els.count.textContent = `${res.total.toLocaleString()} ${state.onlyFailures ? 'failure' : 'attempt'}(s)`;
+    setPager(res.offset, res.rows.length, res.total);
+  }
+
+  function reloadRows() {
+    if (state.src === 'db') loadDbRows();
+    else if (state.src === 'log') loadFetchLogRows();
+    else loadDwcRows();
+  }
 
   function setPager(offset, shown, total) {
     els.prev.disabled = state.page <= 0;
@@ -362,13 +408,16 @@
     if (!state.parentReady) {
       els.schema.innerHTML = ''; els.schema.hidden = true;
       els.folder.hidden = true; els.file.hidden = true;
+      if (els.failOnly) els.failOnly.hidden = true;
       renderEmpty('◍ set a save location above to browse downloaded data');
       clearJson(); clearImage();
       els.count.textContent = ''; setPager(0, 0, 0);
       return;
     }
     state.page = 0;
-    if (state.src === 'db') loadDb(); else loadDwc(true);
+    if (state.src === 'db') loadDb();
+    else if (state.src === 'log') loadFetchLog();
+    else loadDwc(true);
   }
 
   function setParentReady(ready) {
@@ -380,6 +429,8 @@
     els.srcBtns = Array.from(document.querySelectorAll('#tab-viewer .vw-src-btn'));
     els.folder = document.getElementById('vw-folder');
     els.file = document.getElementById('vw-file');
+    els.failOnly = document.getElementById('vw-failonly');
+    els.failOnlyCb = document.getElementById('vw-failonly-cb');
     els.search = document.getElementById('vw-search');
     els.count = document.getElementById('vw-count');
     els.refresh = document.getElementById('vw-refresh');
@@ -396,6 +447,7 @@
     els.srcBtns.forEach((b) => b.addEventListener('click', () => setSource(b.dataset.src)));
     els.folder.addEventListener('change', () => { state.folder = els.folder.value; state.page = 0; updateFileOptions(); loadDwcRows(); });
     els.file.addEventListener('change', () => { state.file = els.file.value; state.page = 0; loadDwcRows(); });
+    els.failOnlyCb.addEventListener('change', () => { state.onlyFailures = els.failOnlyCb.checked; state.page = 0; loadFetchLogRows(); });
     els.search.addEventListener('input', () => {
       clearTimeout(searchTimer);
       searchTimer = setTimeout(() => { state.search = els.search.value.trim(); state.page = 0; reloadRows(); }, 250);

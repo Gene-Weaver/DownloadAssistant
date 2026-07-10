@@ -244,6 +244,16 @@ function register(win) {
     if (!pd) return null;
     return viewer.imageByGbifId(dbFileFor(pd), paths.resolvePaths(pd).images, gbifId, maxDim || 1400);
   });
+  ipcMain.handle('viewer:fetchLog', (_e, opts) => {
+    const pd = settings.getParentDir();
+    if (!pd) return { rows: [], total: 0, limit: 100, offset: 0 };
+    return db.fetchLog(dbFileFor(pd), opts || {});
+  });
+  ipcMain.handle('viewer:fetchStats', () => {
+    const pd = settings.getParentDir();
+    if (!pd) return { byHost: [], winners: [] };
+    return db.fetchStats(dbFileFor(pd));
+  });
 }
 
 module.exports = { register };

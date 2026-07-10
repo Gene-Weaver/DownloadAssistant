@@ -112,12 +112,14 @@
           <div class="vw-src">
             <button class="vw-src-btn active" data-src="db">▚ DATABASE</button>
             <button class="vw-src-btn" data-src="dwc">▚ DWC FOLDERS</button>
+            <button class="vw-src-btn" data-src="log">▚ FETCH LOG</button>
           </div>
           <select id="vw-folder" class="input mono vw-folder" hidden></select>
           <select id="vw-file" class="input mono vw-file" hidden>
             <option value="occurrence.csv">occurrence.csv</option>
             <option value="multimedia.csv">multimedia.csv</option>
           </select>
+          <label class="vw-failonly mono" id="vw-failonly" hidden><input type="checkbox" id="vw-failonly-cb" checked /> failures only</label>
           <input id="vw-search" class="input mono vw-search" placeholder="filter rows…" spellcheck="false" autocomplete="off" />
           <div class="spacer"></div>
           <span id="vw-count" class="vw-count mono"></span>

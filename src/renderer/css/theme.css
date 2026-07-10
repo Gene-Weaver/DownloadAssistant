@@ -617,6 +617,10 @@ html, body {
 .vw-schema-chip i { color: var(--amber); font-style: normal; font-size: 10px; }
 .vw-schema-chip.pk { border-color: var(--green-dim); }
 .vw-schema-chip.pk b { color: var(--green); }
+.vw-schema-chip.bad { border-color: rgba(255, 59, 78, 0.4); background: rgba(255, 59, 78, 0.05); }
+.vw-schema-chip.bad b { color: var(--amber); }
+.vw-failonly { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: 11px; white-space: nowrap; cursor: pointer; }
+.vw-failonly input { accent-color: var(--green); margin: 0; }
 
 /* 20% row buttons · 50% JSON · 30% image */
 .vw-body {
