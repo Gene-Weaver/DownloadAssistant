@@ -277,8 +277,12 @@ function nextQueueBatch(dbFile, { key, status = 'pending', limit = 500 } = {}) {
   const args = [status];
   let where = 'status = ?';
   if (key) { where += ' AND download_key = ?'; args.push(String(key)); }
-  // host_seq first → domain-interleaved order (round-robin across hosts).
-  return db.prepare(`SELECT * FROM download_queue WHERE ${where} ORDER BY host_seq, host LIMIT ?`).all(...args, limit);
+  // Draw a RANDOM window of the remaining rows each refill. A random shuffle
+  // scatters gbifIDs across domains so the pool doesn't march through one host's
+  // block; combined with the per-host in-flight cap + per-worker streak delay in
+  // the drain, no single domain gets hammered. Re-randomizing on every refill also
+  // means no host can be permanently starved by a stale/uneven stored ordering.
+  return db.prepare(`SELECT * FROM download_queue WHERE ${where} ORDER BY RANDOM() LIMIT ?`).all(...args, limit);
 }
 
 function setQueueStatus(dbFile, gbifId, status, err) {
@@ -342,15 +346,20 @@ function fetchLog(dbFile, { limit = 100, offset = 0, search = '', onlyFailures =
   const off = Math.max(0, offset | 0);
   const clauses = [];
   const params = [];
-  if (onlyFailures) clauses.push("outcome != 'success'");
+  // host/gbif_id/method live in BOTH joined tables, so every column is qualified.
+  if (onlyFailures) clauses.push("f.outcome != 'success'");
   const term = String(search || '').trim();
   if (term) {
-    clauses.push('(host LIKE ? OR gbif_id LIKE ? OR method LIKE ? OR outcome LIKE ?)');
-    params.push(`%${term}%`, `%${term}%`, `%${term}%`, `%${term}%`);
+    clauses.push('(f.host LIKE ? OR f.gbif_id LIKE ? OR f.method LIKE ? OR f.outcome LIKE ? OR q.image_url LIKE ?)');
+    params.push(`%${term}%`, `%${term}%`, `%${term}%`, `%${term}%`, `%${term}%`);
   }
+  // JOIN the queue row (gbif_id is its PRIMARY KEY) so every log entry carries the
+  // image_url we tried; the GBIF occurrence page is derived from the id.
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
-  const total = db.prepare(`SELECT COUNT(*) AS n FROM fetch_log ${where}`).get(...params).n;
-  const rows = db.prepare(`SELECT * FROM fetch_log ${where} ORDER BY id DESC LIMIT ? OFFSET ?`).all(...params, lim, off);
+  const from = 'FROM fetch_log f LEFT JOIN download_queue q ON q.gbif_id = f.gbif_id';
+  const total = db.prepare(`SELECT COUNT(*) AS n ${from} ${where}`).get(...params).n;
+  const rows = db.prepare(`SELECT f.*, q.image_url AS image_url ${from} ${where} ORDER BY f.id DESC LIMIT ? OFFSET ?`).all(...params, lim, off);
+  for (const r of rows) r.gbif_url = r.gbif_id ? `https://www.gbif.org/occurrence/${r.gbif_id}` : null;
   return { rows, total, limit: lim, offset: off };
 }
 

@@ -58,7 +58,9 @@
   // --- worker-count control ------------------------------------------------
   function renderWorkerControl() {
     if (!els.wkCount) return;
-    els.wkCount.textContent = String(state.workerCount);
+    // Display is 1-based (index starts at 1); the app keeps using the raw base-0
+    // value (state.workerCount) everywhere else, unchanged.
+    els.wkCount.textContent = String(state.workerCount + 1);
     // Locked while a download is actively running (paused/idle = editable).
     els.workerCtl.classList.toggle('locked', state.jobRunning);
     els.wkDec.disabled = state.jobRunning || state.workerCount <= 1;

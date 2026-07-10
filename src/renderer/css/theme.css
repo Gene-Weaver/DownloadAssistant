@@ -830,6 +830,8 @@ html, body {
 .jtree-val.str { color: var(--green-soft); }
 .jtree-val.bool { color: var(--magenta); }
 .jtree-val.null { color: var(--muted); font-style: italic; }
+a.jtree-link { color: var(--green); text-decoration: underline; cursor: pointer; word-break: break-all; }
+a.jtree-link:hover { color: var(--amber); }
 
 /* ===================== header worker-count control ===================== */
 .header-right { margin-left: auto; display: flex; align-items: center; gap: 12px; }

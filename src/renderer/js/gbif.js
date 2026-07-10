@@ -552,7 +552,7 @@
   // a small fixed pool of reporting worker slots (rows come back domain-
   // interleaved). Each slot shows its live UA method on the board; the winning
   // UA / failure trail goes back to main for the fetch_log.
-  const WEBVIEW_WORKERS = 4;
+  const WEBVIEW_WORKERS = 8;
   async function startBlockedDrain(key) {
     if (state.job.draining) return;
     state.job.draining = true;
@@ -612,13 +612,16 @@
     const delay = cur ? (cur.delayActive ? '<span class="wk-delay on">Delay Active</span>' : '<span class="wk-delay">Delay</span>') : '';
     const prevStatus = prev ? (prev.ok ? '<span class="wk-ok">Success</span>' : '<span class="wk-fail">Failure</span>') : '';
     const prevItem = prev ? `Item: ${esc(prev.gbif_id)} | ${esc(prev.herbCode || '—')}` : '';
+    // Every text row reserves its line even when empty (&nbsp;) so a tile's inner
+    // spacing stays fixed instead of jumping as workers pick up / drop items.
+    const ph = (s) => s || '&nbsp;';
     return `<div class="wk-card${cur ? ' busy' : ''}">
-      <div class="wk-item">${item}</div>
-      <div class="wk-method">${method}</div>
-      <div class="wk-delayrow">${delay}</div>
+      <div class="wk-item">${ph(item)}</div>
+      <div class="wk-method">${ph(method)}</div>
+      <div class="wk-delayrow">${ph(delay)}</div>
       <div class="wk-hr"></div>
-      <div class="wk-prevstatus">${prevStatus}</div>
-      <div class="wk-previtem">${prevItem}</div>
+      <div class="wk-prevstatus">${ph(prevStatus)}</div>
+      <div class="wk-previtem">${ph(prevItem)}</div>
     </div>`;
   }
   // 2 rows up to 16 workers, 3 rows beyond that; columns fit the count so the
@@ -634,7 +637,11 @@
     const el = els.workers;
     if (!el) return;
     const direct = state.directWorkers || [];
-    const web = (state.webviewWorkers || []).filter((w) => w && (w.current || w.prev));
+    // While the fallback drain is live, show ALL webview slots (each gets a tile,
+    // idle ones rendered with placeholder rows); once it winds down, keep only the
+    // slots that carry a last result.
+    const draining = !!(state.job && state.job.draining);
+    const web = (state.webviewWorkers || []).filter((w) => w && (draining || w.current || w.prev));
     const anyBusy = direct.some((w) => w && w.current) || web.some((w) => w.current);
     const jobBusy = state.job.active && state.job.active.busy && !state.job.active.paused;
     if (!direct.length || (!anyBusy && !jobBusy)) { el.hidden = true; return; }

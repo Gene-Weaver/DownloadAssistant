@@ -41,7 +41,18 @@
     const leaf = document.createElement('div');
     leaf.className = 'jtree-leaf';
     const k = document.createElement('span'); k.className = 'jtree-key'; k.textContent = key;
-    const v = document.createElement('span'); v.className = 'jtree-val ' + valClass(value); v.textContent = fmtVal(value);
+    let v;
+    if (typeof value === 'string' && /^https?:\/\//i.test(value)) {
+      // URL values (e.g. fetch-log image_url / gbif_url) open in the real browser
+      // — the window-open handler routes http(s) to shell.openExternal.
+      v = document.createElement('a');
+      v.className = 'jtree-val str jtree-link';
+      v.textContent = value; v.href = value; v.title = 'Open in browser';
+      v.addEventListener('click', (e) => { e.preventDefault(); try { window.open(value); } catch (_) {} });
+    } else {
+      v = document.createElement('span');
+      v.className = 'jtree-val ' + valClass(value); v.textContent = fmtVal(value);
+    }
     leaf.append(k, v);
     return leaf;
   }
