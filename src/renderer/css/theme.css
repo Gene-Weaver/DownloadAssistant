@@ -362,15 +362,61 @@ html, body {
 .gbif-auth { font-size: 11px; color: var(--muted); letter-spacing: 0.3px; white-space: nowrap; max-width: 44ch; overflow: hidden; text-overflow: ellipsis; }
 .gbif-auth.ok { color: var(--green); text-shadow: 0 0 4px rgba(51,255,102,0.4); }
 .gbif-auth.warn { color: var(--amber); }
-.gbif-job {
+/* bottom-docked stack: job card on top, live worker board below it */
+.gbif-jobstack {
   position: absolute;
   left: 16px; right: 16px; bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 72%;
+  pointer-events: none; /* let the webview receive clicks where the stack is empty */
+}
+.gbif-jobstack > * { pointer-events: auto; }
+.gbif-job {
   background: var(--bg-panel);
   border: 1px solid var(--green-dim);
   border-radius: 3px;
   padding: 12px 14px;
   box-shadow: 0 0 24px rgba(0,0,0,0.6), 0 0 12px rgba(51,255,102,0.12);
 }
+
+/* live worker board: 2 rows, columns = ceil(workers/2) */
+.gbif-workers {
+  display: grid;
+  grid-template-columns: repeat(var(--wcols, 8), 1fr);
+  grid-auto-rows: 1fr;
+  gap: 5px;
+  overflow: auto;
+  padding: 8px;
+  background: rgba(4, 7, 12, 0.92);
+  border: 1px solid var(--green-line);
+  border-radius: 3px;
+  box-shadow: 0 0 24px rgba(0,0,0,0.6);
+}
+.wk-card {
+  border: 1px solid var(--green-line);
+  border-radius: 2px;
+  padding: 5px 6px;
+  background: rgba(51, 255, 102, 0.015);
+  font-family: var(--mono);
+  font-size: 9.5px;
+  line-height: 1.35;
+  min-width: 0;
+  overflow: hidden;
+}
+.wk-card.busy { border-color: var(--green-dim); background: rgba(51, 255, 102, 0.06); }
+.wk-item, .wk-previtem { color: var(--green-soft); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wk-method { color: var(--cyan); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wk-idle { color: var(--green-line); }
+.wk-delayrow { min-height: 12px; }
+.wk-delay { color: #3a4a40; }              /* dimmed when not active */
+.wk-delay.on { color: var(--red); text-shadow: 0 0 5px rgba(255,59,78,0.5); font-weight: 700; }
+.wk-hr { border-top: 1px dashed var(--green-line); margin: 3px 0; }
+.wk-prevstatus { min-height: 12px; }
+.wk-ok { color: var(--green); }
+.wk-fail { color: var(--red); }
+.wk-previtem { color: var(--muted); }
 .job-head { display: flex; align-items: center; gap: 12px; color: var(--green); letter-spacing: 0.5px; }
 .job-phase { flex: 1; }
 .job-meta { color: var(--muted); font-size: 11px; white-space: nowrap; }

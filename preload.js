@@ -40,6 +40,7 @@ const api = {
     failBlocked:   invoke('gbif:failBlocked'),    // (key, gbifId, {kind,status,trail})
     onJobProgress: (cb) => ipcRenderer.on('gbif:jobProgress', (_e, d) => cb(d)),
     onJobsActive:  (cb) => ipcRenderer.on('gbif:jobsActive',  (_e, d) => cb(d)),
+    onWorkers:     (cb) => ipcRenderer.on('gbif:workers',     (_e, d) => cb(d)),
   },
   auth: {
     status:   invoke('auth:status'),   // () -> { available, method, username }

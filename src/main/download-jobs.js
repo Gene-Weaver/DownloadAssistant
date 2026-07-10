@@ -23,10 +23,13 @@ const predicate = require('../server/predicate-builder');
 const dwca = require('../server/dwca');
 const imageFetch = require('../server/image-fetch');
 const downloadService = require('../server/download-service');
+const { generateImageFilename } = require('../server/herb-code');
 
 const POLL_MS = 20000;
-const DRAIN_GLOBAL = 8;    // concurrent direct fetches
+const DRAIN_GLOBAL = 16;   // concurrent direct fetches (worker board shows each)
 const DRAIN_PER_HOST = 2;  // per institution host (be polite)
+
+function herbCodeOf(occ) { try { return generateImageFilename(occ, null).herbCode; } catch (_) { return ''; } }
 const EXTRACT = ['occurrence.txt', 'multimedia.txt', 'verbatim.txt', 'citations.txt', 'rights.txt', 'metadata.xml', 'meta.xml'];
 
 let win = null;
@@ -64,6 +67,16 @@ function compactOccFromSearch(occ) {
   };
 }
 function pushProgress(parentDir, key) { push('gbif:jobProgress', snapshot(parentDir, key)); }
+
+// Live per-worker board (throttled). job.workers[i] = { current, prev }.
+let lastWorkersPush = 0;
+function pushWorkers(key, force) {
+  const now = Date.now();
+  if (!force && now - lastWorkersPush < 300) return;
+  lastWorkersPush = now;
+  const job = jobs.get(key) || {};
+  push('gbif:workers', { key, count: DRAIN_GLOBAL, workers: job.workers || [] });
+}
 
 // --- submit ---------------------------------------------------------------
 async function submit(searchUrl) {
@@ -214,6 +227,7 @@ async function startDrain(parentDir, key) {
   const job = jobs.get(key) || {}; job.parentDir = parentDir; job.cancelled = false; jobs.set(key, job);
   if (job.draining) return;
   job.draining = true;
+  if (!job.workers) job.workers = Array.from({ length: DRAIN_GLOBAL }, () => ({ current: null, prev: null }));
   const dbFile = dbFileFor(parentDir);
   db.resetInProgress(dbFile);
 
@@ -226,6 +240,8 @@ async function startDrain(parentDir, key) {
   }
 
   job.draining = false;
+  job.workers = job.workers.map((w) => ({ current: null, prev: w.prev })); // all idle
+  pushWorkers(key, true);
   checkComplete(parentDir, key);
   pushProgress(parentDir, key);
 }
@@ -252,7 +268,7 @@ async function drainPass(parentDir, key, job) {
   };
   const maybePush = () => { const n = Date.now(); if (n - lastPush > 800) { lastPush = n; pushProgress(parentDir, key); } };
 
-  const worker = async () => {
+  const worker = async (w) => {
     let lastHost = null;
     let streak = 0; // consecutive same-host downloads by THIS worker
     while (!job.cancelled) {
@@ -265,14 +281,20 @@ async function drainPass(parentDir, key, job) {
       // >5 in a row from one host → 2s rest to give that server a break; the
       // moment the host changes, streak resets and there's no delay.
       if (row.host === lastHost) streak += 1; else { streak = 1; lastHost = row.host; }
-      if (streak > 5) await sleep(2000);
+      const delayActive = streak > 5;
+      const occ = JSON.parse(row.occ_json || '{}');
+      const herbCode = herbCodeOf(occ);
+      job.workers[w] = { current: { gbif_id: row.gbif_id, herbCode, method: 'direct', delayActive }, prev: (job.workers[w] || {}).prev };
+      pushWorkers(key);
+      if (delayActive) await sleep(2000);
       inc(row.host);
+      let ok = false;
       try {
-        const occ = JSON.parse(row.occ_json || '{}');
         const buf = await imageFetch.tryDirect(row.image_url); // ONE attempt, no retry
         await downloadService.saveOne({ parentDir, occ, publisher: null, imageBuffer: buf, imageUrl: row.image_url });
         db.setQueueOutcome(dbFile, row.gbif_id, { status: 'done', method: 'direct', http_status: 200 });
         db.logFetch(dbFile, { gbif_id: row.gbif_id, host: row.host, method: 'direct', outcome: 'success', http_status: 200 });
+        ok = true;
       } catch (e) {
         db.logFetch(dbFile, { gbif_id: row.gbif_id, host: row.host, method: 'direct', outcome: e.outcome || 'error', http_status: e.status, message: e.message });
         const kind = e.kind || 'transient';
@@ -281,12 +303,14 @@ async function drainPass(parentDir, key, job) {
         else db.setQueueOutcome(dbFile, row.gbif_id, { status: 'failed', method: 'direct', http_status: e.status, error: e.message }); // transient — retry later
       } finally {
         dec(row.host);
+        job.workers[w] = { current: null, prev: { gbif_id: row.gbif_id, herbCode, ok } };
+        pushWorkers(key);
         await sleep(60 + Math.floor(Math.random() * 140)); // jitter, per worker
         maybePush();
       }
     }
   };
-  await Promise.all(Array.from({ length: DRAIN_GLOBAL }, worker));
+  await Promise.all(Array.from({ length: DRAIN_GLOBAL }, (_, w) => worker(w)));
 }
 
 // --- renderer-driven webview drain of blocked rows ------------------------
@@ -294,7 +318,11 @@ function nextBlocked(parentDir, key, limit = 12) {
   const dbFile = dbFileFor(parentDir);
   const rows = db.nextQueueBatch(dbFile, { key, status: 'blocked', limit });
   for (const r of rows) db.setQueueStatus(dbFile, r.gbif_id, 'in_progress'); // claim
-  return rows.map((r) => ({ gbif_id: r.gbif_id, image_url: r.image_url }));
+  return rows.map((r) => {
+    let herbCode = '';
+    try { herbCode = herbCodeOf(JSON.parse(r.occ_json || '{}')); } catch (_) { /* noop */ }
+    return { gbif_id: r.gbif_id, image_url: r.image_url, herbCode };
+  });
 }
 
 async function saveBlocked(parentDir, key, gbifId, imageBuffer, method, trail) {

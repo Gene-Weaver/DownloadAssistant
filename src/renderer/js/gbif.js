@@ -43,6 +43,7 @@
     parentReady: false, bulk: { running: false, cancel: false },
     bookmarks: [], menuOpen: false, enumerating: false,
     authStatus: { available: false }, job: { active: null, draining: false }, tokenTimer: null,
+    directWorkers: [], webviewWorkers: [],
   };
 
   // Best-effort scan of the logged-in GBIF webview session for a JWT (three
@@ -160,12 +161,13 @@
       outcome: /not-an-image/i.test(s) ? 'not_image' : (http ? 'http_error' : (dns ? 'broken' : 'error')),
     };
   }
-  async function fetchImageBytes(imageUrl) {
+  async function fetchImageBytes(imageUrl, opts = {}) {
     const tiers = [{ ua: null, method: 'webview-electron' }];
     if (CLEAN_UA && CLEAN_UA !== navigator.userAgent) tiers.push({ ua: CLEAN_UA, method: 'webview-clean' });
     if (REALISTIC_UA !== navigator.userAgent && REALISTIC_UA !== CLEAN_UA) tiers.push({ ua: REALISTIC_UA, method: 'webview-realistic' });
     const trail = [];
     for (const t of tiers) {
+      if (opts.onAttempt) { try { opts.onAttempt(t.method); } catch (_) {} }
       try {
         const dataUrl = await downloadViaWebview(imageUrl, t.ua ? { userAgent: t.ua } : {});
         trail.push({ method: t.method, outcome: 'success' });
@@ -546,34 +548,89 @@
     if (doiEl) doiEl.addEventListener('click', () => { try { window.open(`https://doi.org/${snap.doi}`); } catch (_) {} });
   }
 
-  // Drain rows a host bot-blocked (tiers 2–4) through the webview session. Rows
-  // come back domain-interleaved (host_seq) and are processed at low concurrency
-  // — these are already-touchy hosts, so be gentle. Reports the winning UA (or
-  // the full failure trail) back to main for the fetch_log.
+  // Drain rows a host bot-blocked (tiers 2–4) through the webview session, using
+  // a small fixed pool of reporting worker slots (rows come back domain-
+  // interleaved). Each slot shows its live UA method on the board; the winning
+  // UA / failure trail goes back to main for the fetch_log.
+  const WEBVIEW_WORKERS = 4;
   async function startBlockedDrain(key) {
     if (state.job.draining) return;
     state.job.draining = true;
+    state.webviewWorkers = Array.from({ length: WEBVIEW_WORKERS }, () => ({ current: null, prev: null }));
     await api.gbif.setCapture(true);
-    try {
+    let queue = [];
+    const nextItem = async () => {
+      if (!queue.length) queue = await api.gbif.nextBlocked(key, 12);
+      return queue.shift() || null;
+    };
+    const worker = async (w) => {
       while (true) {
-        const batch = await api.gbif.nextBlocked(key, 6);
-        if (!batch || !batch.length) break;
-        await Promise.all(batch.map(async (it) => {
-          try {
-            const r = await fetchImageBytes(it.image_url);
-            await api.gbif.saveBlocked(key, it.gbif_id, r.dataUrl, r.method, r.trail);
-          } catch (e) {
-            await api.gbif.failBlocked(key, it.gbif_id, { kind: (e && e.kind) || 'failed', status: (e && e.status) || null, trail: (e && e.trail) || [] });
-          }
-        }));
+        const it = await nextItem();
+        if (!it) break;
+        state.webviewWorkers[w] = { current: { gbif_id: it.gbif_id, herbCode: it.herbCode, method: 'webview-electron', delayActive: false }, prev: (state.webviewWorkers[w] || {}).prev };
+        renderWorkers();
+        let ok = false;
+        try {
+          const r = await fetchImageBytes(it.image_url, { onAttempt: (m) => { if (state.webviewWorkers[w] && state.webviewWorkers[w].current) { state.webviewWorkers[w].current.method = m; renderWorkers(); } } });
+          await api.gbif.saveBlocked(key, it.gbif_id, r.dataUrl, r.method, r.trail);
+          ok = true;
+        } catch (e) {
+          await api.gbif.failBlocked(key, it.gbif_id, { kind: (e && e.kind) || 'failed', status: (e && e.status) || null, trail: (e && e.trail) || [] });
+        }
+        state.webviewWorkers[w] = { current: null, prev: { gbif_id: it.gbif_id, herbCode: it.herbCode, ok } };
+        renderWorkers();
       }
-    } finally { await api.gbif.setCapture(false); state.job.draining = false; }
+    };
+    await Promise.all(Array.from({ length: WEBVIEW_WORKERS }, (_, w) => worker(w)));
+    await api.gbif.setCapture(false);
+    state.webviewWorkers = (state.webviewWorkers || []).map((w) => ({ current: null, prev: w.prev }));
+    renderWorkers();
+    state.job.draining = false;
   }
 
   function onJobProgress(snap) {
     state.job.active = snap;
     renderJob(snap);
+    renderWorkers();
     if (snap && snap.counts && snap.counts.blocked > 0) startBlockedDrain(snap.key);
+  }
+
+  // --- live worker board ---------------------------------------------------
+  function methodLabel(m) {
+    return {
+      direct: '① Chrome (direct)',
+      'webview-electron': '② Electron UA',
+      'webview-clean': '③ Chrome face',
+      'webview-realistic': '④ Realistic Chrome',
+    }[m] || (m || '');
+  }
+  function workerCard(w) {
+    const cur = w && w.current;
+    const prev = w && w.prev;
+    const item = cur ? `Item: ${esc(cur.gbif_id)} | ${esc(cur.herbCode || '—')}` : '<span class="wk-idle">— idle —</span>';
+    const method = cur ? esc(methodLabel(cur.method)) : '';
+    const delay = cur ? (cur.delayActive ? '<span class="wk-delay on">Delay Active</span>' : '<span class="wk-delay">Delay</span>') : '';
+    const prevStatus = prev ? (prev.ok ? '<span class="wk-ok">Success</span>' : '<span class="wk-fail">Failure</span>') : '';
+    const prevItem = prev ? `Item: ${esc(prev.gbif_id)} | ${esc(prev.herbCode || '—')}` : '';
+    return `<div class="wk-card${cur ? ' busy' : ''}">
+      <div class="wk-item">${item}</div>
+      <div class="wk-method">${method}</div>
+      <div class="wk-delayrow">${delay}</div>
+      <div class="wk-hr"></div>
+      <div class="wk-prevstatus">${prevStatus}</div>
+      <div class="wk-previtem">${prevItem}</div>
+    </div>`;
+  }
+  function renderWorkers() {
+    const el = els.workers;
+    if (!el) return;
+    const all = (state.directWorkers || []).concat(state.webviewWorkers || []);
+    const anyBusy = all.some((w) => w && w.current);
+    const jobBusy = state.job.active && state.job.active.busy;
+    if (!all.length || (!anyBusy && !jobBusy)) { el.hidden = true; return; }
+    el.hidden = false;
+    el.style.setProperty('--wcols', Math.max(1, Math.ceil(all.length / 2)));
+    el.innerHTML = all.map(workerCard).join('');
   }
 
   function wire() {
@@ -585,6 +642,7 @@
     els.bmMenu = document.getElementById('gbif-bm-menu');
     els.auth = document.getElementById('gbif-auth');
     els.job = document.getElementById('gbif-job');
+    els.workers = document.getElementById('gbif-workers');
     els.progress = document.getElementById('gbif-progress');
     els.progressText = document.getElementById('gbif-progress-text');
     els.progressSub = document.getElementById('gbif-progress-sub');
@@ -632,6 +690,7 @@
     });
     // Background bulk-download job progress + resumed jobs on startup.
     api.gbif.onJobProgress(onJobProgress);
+    api.gbif.onWorkers((data) => { state.directWorkers = (data && data.workers) || []; renderWorkers(); });
     api.gbif.onJobsActive(async () => {
       try {
         const jobs = await api.gbif.listJobs();
