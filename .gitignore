@@ -1,0 +1,14 @@
+node_modules/
+build/
+dist/
+.DS_Store
+*.log
+
+# Claude Code / editor temp files
+*.tmp.*
+scratch_designs/
+
+# never commit local env / secrets
+.env
+.env.*
+!.env.example

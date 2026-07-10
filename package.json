@@ -1,0 +1,92 @@
+{
+  "name": "download-assistant",
+  "version": "0.1.0",
+  "description": "Download Assistant — a tabbed browser for acquiring specimen images from GBIF (and, later, other sources) with full Darwin Core metadata, organized on disk and indexed in SQLite.",
+  "main": "main.js",
+  "author": "Will Weaver",
+  "license": "GPL-3.0",
+  "scripts": {
+    "start": "electron .",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder",
+    "release": "electron-builder --publish always",
+    "postinstall": "electron-builder install-app-deps"
+  },
+  "devDependencies": {
+    "electron": "^28.3.3",
+    "electron-builder": "^25.0.0"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.3.0",
+    "electron-updater": "^6.8.9",
+    "sharp": "^0.33.5"
+  },
+  "build": {
+    "appId": "org.willweaver.download-assistant",
+    "productName": "Download Assistant",
+    "artifactName": "DownloadAssistant-${version}-${arch}.${ext}",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build-resources"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "src/**/*",
+      "!**/.env",
+      "!**/.env.*"
+    ],
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "Gene-Weaver",
+        "repo": "DownloadAssistant"
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.education",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build-resources/entitlements.mac.plist",
+      "entitlementsInherit": "build-resources/entitlements.mac.plist",
+      "notarize": true,
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ]
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "linux": {
+      "category": "Education",
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    }
+  }
+}

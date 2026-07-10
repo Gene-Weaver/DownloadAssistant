@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- V8 / JavaScriptCore JIT under the Hardened Runtime -->
+  <key>com.apple.security.cs.allow-jit</key>
+  <true/>
+  <!-- V8 allocates writable + executable memory -->
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+  <!-- Load native node modules / dylibs (better-sqlite3, sharp) not signed by us -->
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+  <!-- Electron/Node commonly read DYLD_* environment variables -->
+  <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+  <true/>
+</dict>
+</plist>

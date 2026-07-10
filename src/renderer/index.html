@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <!--
+    Local trusted page. connect/img are 'self' only (all network I/O happens in
+    the main process); the <webview> guest is a separate context and is NOT
+    constrained by this CSP, so gbif.org still loads freely inside the tab.
+  -->
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self';" />
+  <title>Download Assistant</title>
+  <link rel="stylesheet" href="css/theme.css" />
+</head>
+<body>
+  <div class="crt" aria-hidden="true"></div>
+
+  <div id="app">
+    <!-- ===== header: save location ===== -->
+    <header id="topbar">
+      <div class="brand">
+        <span class="brand-mark">▚▚</span>
+        <span class="brand-name">DOWNLOAD_ASSISTANT</span>
+        <span class="cursor">▊</span>
+        <span class="brand-sub">// specimen image acquisition unit</span>
+        <span id="updater-bar" class="updater-bar mono" hidden></span>
+      </div>
+
+      <div class="savebar">
+        <label class="savebar-label" for="parent-dir">PARENT_DIR&nbsp;<span class="prompt">&gt;</span></label>
+        <input id="parent-dir" class="input mono" spellcheck="false" autocomplete="off"
+               placeholder="/path/to/output  —  type a full path (dirs auto-created) or BROWSE…" />
+        <button id="pick-dir" class="btn" title="Pick a folder with a dialog">◈ BROWSE</button>
+        <button id="set-dir" class="btn btn-go" title="Set this save location">▶ SET</button>
+        <button id="reveal-dir" class="btn ghost" title="Reveal images/ in Finder" disabled>◇ REVEAL</button>
+      </div>
+
+      <div class="pathinfo mono" id="pathinfo">
+        <span class="pi-status" id="pi-status">◍ NO SAVE LOCATION SET — set one to begin</span>
+        <span class="pi-tree" id="pi-tree" hidden>
+          <span class="pi-node">images/</span>
+          <span class="pi-node">dwc/</span>
+          <span class="pi-node">db/images.db</span>
+        </span>
+      </div>
+    </header>
+
+    <!-- ===== tab bar (GBIF now; more sources later) ===== -->
+    <nav id="tabs" role="tablist">
+      <button class="tab active" data-tab="gbif" role="tab" aria-selected="true">[ GBIF ]</button>
+      <button class="tab" data-tab="viewer" role="tab" aria-selected="false">[ VIEWER ]</button>
+      <button class="tab tab-soon" disabled title="More sources coming soon">[ + MORE SOON ]</button>
+    </nav>
+
+    <!-- ===== tab content ===== -->
+    <main id="tab-content">
+      <section id="tab-gbif" class="tab-panel active" role="tabpanel">
+        <div class="gbif-toolbar">
+          <span class="gbif-status mono" id="gbif-status">▶ browse gbif.org — click a specimen to lock a target</span>
+          <div class="spacer"></div>
+          <div class="split-btn" id="gbif-bm">
+            <button class="btn ghost split-main" id="gbif-bm-add" title="Save the current GBIF search">☆ BOOKMARK</button>
+            <button class="btn ghost split-caret" id="gbif-bm-toggle" title="Saved searches" aria-label="Saved searches">▾</button>
+            <div class="split-menu" id="gbif-bm-menu" hidden></div>
+          </div>
+          <button class="btn" id="gbif-import" disabled title="Acquire images from this search (all, or a random subset)">⤓ ACQUIRE SEARCH…</button>
+          <button class="btn btn-go" id="gbif-add" disabled title="Acquire the current specimen">＋ ACQUIRE TARGET</button>
+        </div>
+
+        <div class="gbif-nav">
+          <button class="btn ghost icon-btn" id="gbif-back" title="Back">‹</button>
+          <button class="btn ghost icon-btn" id="gbif-fwd" title="Forward">›</button>
+          <button class="btn ghost icon-btn" id="gbif-reload" title="Reload">⟳</button>
+          <button class="btn ghost icon-btn" id="gbif-home" title="GBIF specimen gallery">⌂</button>
+          <input class="input mono gbif-urlbar" id="gbif-url" spellcheck="false" autocomplete="off"
+                 placeholder="search GBIF, or paste an occurrence URL / id…" />
+        </div>
+
+        <div class="gbif-body">
+          <webview id="gbif-view" class="gbif-view" partition="persist:gbif" allowpopups
+                   src="https://www.gbif.org/occurrence/search?occurrenceStatus=present&view=GALLERY&basisOfRecord=PRESERVED_SPECIMEN&mediaType=StillImage"></webview>
+
+          <div class="gbif-progress" id="gbif-progress" hidden>
+            <div class="gbif-progress-head mono">
+              <span id="gbif-progress-text">ACQUIRING…</span>
+              <button class="btn ghost" id="gbif-progress-cancel">✕ ABORT</button>
+            </div>
+            <div class="gbif-progress-track"><div class="gbif-progress-fill" id="gbif-progress-fill"></div></div>
+            <div class="gbif-progress-sub mono" id="gbif-progress-sub"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===== VIEWER tab: browse the downloaded db + dwc, preview images ===== -->
+      <section id="tab-viewer" class="tab-panel" role="tabpanel">
+        <div class="vw-toolbar">
+          <div class="vw-src">
+            <button class="vw-src-btn active" data-src="db">▚ DATABASE</button>
+            <button class="vw-src-btn" data-src="dwc">▚ DWC FOLDERS</button>
+          </div>
+          <select id="vw-folder" class="input mono vw-folder" hidden></select>
+          <select id="vw-file" class="input mono vw-file" hidden>
+            <option value="occurrence.csv">occurrence.csv</option>
+            <option value="multimedia.csv">multimedia.csv</option>
+          </select>
+          <input id="vw-search" class="input mono vw-search" placeholder="filter rows…" spellcheck="false" autocomplete="off" />
+          <div class="spacer"></div>
+          <span id="vw-count" class="vw-count mono"></span>
+          <button id="vw-refresh" class="btn ghost icon-btn" title="Reload">⟳</button>
+        </div>
+
+        <div id="vw-schema" class="vw-schemabar"></div>
+
+        <div class="vw-body">
+          <div class="vw-list-col">
+            <div id="vw-list" class="vw-list"></div>
+            <div id="vw-pager" class="vw-pager">
+              <button id="vw-prev" class="btn ghost" disabled>‹ PREV</button>
+              <span id="vw-pageinfo" class="vw-pageinfo mono"></span>
+              <button id="vw-next" class="btn ghost" disabled>NEXT ›</button>
+            </div>
+          </div>
+          <div id="vw-image" class="vw-image">
+            <div id="vw-image-empty" class="vw-image-empty">◇ select an item to preview its image</div>
+            <img id="vw-image-img" class="vw-image-img" hidden alt="" />
+            <div id="vw-image-cap" class="vw-image-cap mono"></div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="toast-root"></div>
+  <div id="modal-root"></div>
+
+  <script src="js/bootstrap.js"></script>
+  <script src="js/ui.js"></script>
+  <script src="js/gbif.js"></script>
+  <script src="js/viewer.js"></script>
+  <script src="js/updater.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
