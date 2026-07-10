@@ -637,17 +637,19 @@
     const el = els.workers;
     if (!el) return;
     const direct = state.directWorkers || [];
-    // While the fallback drain is live, show ALL webview slots (each gets a tile,
-    // idle ones rendered with placeholder rows); once it winds down, keep only the
-    // slots that carry a last result.
+    // The browser-fallback pool is a FIXED grid: once it has spun up (or is live),
+    // render ALL its slots persistently — idle ones show placeholder rows — so it
+    // never collapses to a single wide tile between blocked batches. Only hidden
+    // entirely when the pool has never done any fallback work this session.
     const draining = !!(state.job && state.job.draining);
-    const web = (state.webviewWorkers || []).filter((w) => w && (draining || w.current || w.prev));
-    const anyBusy = direct.some((w) => w && w.current) || web.some((w) => w.current);
+    const pool = state.webviewWorkers || [];
+    const webActive = draining || pool.some((w) => w && (w.current || w.prev));
+    const anyBusy = direct.some((w) => w && w.current) || pool.some((w) => w && w.current);
     const jobBusy = state.job.active && state.job.active.busy && !state.job.active.paused;
     if (!direct.length || (!anyBusy && !jobBusy)) { el.hidden = true; return; }
     el.hidden = false;
     let html = gridHtml(direct);
-    if (web.length) html += `<div class="wk-weblabel mono">browser fallback</div>${gridHtml(web, 'wk-web')}`;
+    if (webActive && pool.length) html += `<div class="wk-weblabel mono">browser fallback</div>${gridHtml(pool, 'wk-web')}`;
     el.innerHTML = html;
   }
 
