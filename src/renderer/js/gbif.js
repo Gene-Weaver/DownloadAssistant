@@ -33,6 +33,25 @@
     });
   })()`;
 
+  // Detect a Cloudflare wall on the page currently loaded in a (fetch or visible)
+  // webview. Returns { state, ct } where state is 'image' (the raw image loaded —
+  // solved), 'interactive' (Turnstile/managed challenge needing a human click),
+  // 'challenge' (non-interactive "just a moment" JS challenge), or 'html' (some
+  // other page). Used to route to the one-time human solve for mnhn-style hosts.
+  const CF_PROBE = `(() => {
+    const ct = (document.contentType || '').toLowerCase();
+    if (ct.indexOf('image/') === 0) return { state: 'image', ct };
+    const t = (document.title || '').toLowerCase();
+    const html = (document.documentElement ? document.documentElement.innerHTML : '').slice(0, 6000);
+    const interactive = !!document.querySelector('iframe[src*="challenges.cloudflare.com"], .cf-turnstile, #challenge-stage, #cf-turnstile')
+      || /turnstile|managed challenge|verify you are human|needs to review the security/i.test(html);
+    const challenge = /just a moment|attention required|checking your browser|cf-browser-verification/i.test(t)
+      || /__cf_chl|cf_chl_opt|challenge-platform|cf-challenge/i.test(html);
+    if (interactive) return { state: 'interactive', ct };
+    if (challenge) return { state: 'challenge', ct };
+    return { state: 'html', ct };
+  })()`;
+
   // Plain-Chrome UA (default Electron UA minus the Electron token), used ONLY as
   // a per-image fallback when a host rejects the Electron UA (e.g. Smithsonian
   // ids.si.edu returns an HTML "Request Rejected" to any UA containing "Electron").
@@ -44,7 +63,14 @@
     bookmarks: [], menuOpen: false, enumerating: false,
     authStatus: { available: false }, job: { active: null, draining: false }, tokenTimer: null,
     directWorkers: [], webviewWorkers: [],
+    // Cloudflare-gated hosts (e.g. mediaphoto.mnhn.fr use an interactive Turnstile).
+    // cfCleared: host -> { ua } once a cf_clearance cookie exists (pin THAT ua, no
+    // rotation). cfGated: hosts awaiting a one-time human solve. cfSample: a sample
+    // blocked image_url per gated host to open in the visible webview for solving.
+    cfCleared: new Map(), cfGated: new Set(), cfSample: new Map(), cfSolving: null,
   };
+
+  const hostOf = (u) => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch (_) { return ''; } };
 
   // Best-effort scan of the logged-in GBIF webview session for a JWT (three
   // base64url segments), incl. tokens nested in stored JSON. Lets us reuse the
@@ -118,6 +144,18 @@
 
       fw.addEventListener('did-finish-load', async () => {
         try {
+          if (opts.detectCf) {
+            // Peek for a Cloudflare wall before trying to read bytes. If gated, tell
+            // the caller (which routes to the one-time human solve) instead of
+            // burning the other UA tiers (which just re-trip the challenge).
+            let probe = null;
+            try { probe = await fw.executeJavaScript(CF_PROBE, true); } catch (_) { /* fall through */ }
+            if (probe && (probe.state === 'interactive' || probe.state === 'challenge')) {
+              const e = new Error('cloudflare-' + probe.state);
+              e.cf = true; e.interactive = probe.state === 'interactive';
+              finish(reject, e); return;
+            }
+          }
           const dataUrl = await fw.executeJavaScript(FETCH_SNIPPET, true);
           finish(resolve, dataUrl);
         } catch (e) {
@@ -162,17 +200,36 @@
     };
   }
   async function fetchImageBytes(imageUrl, opts = {}) {
-    const tiers = [{ ua: null, method: 'webview-electron' }];
-    if (CLEAN_UA && CLEAN_UA !== navigator.userAgent) tiers.push({ ua: CLEAN_UA, method: 'webview-clean' });
-    if (REALISTIC_UA !== navigator.userAgent && REALISTIC_UA !== CLEAN_UA) tiers.push({ ua: REALISTIC_UA, method: 'webview-realistic' });
+    const host = hostOf(imageUrl);
+    // A host we've cleared through Cloudflare (via a one-time human solve): its
+    // cf_clearance cookie is bound to the EXACT ua that solved it, so pin THAT ua
+    // (no rotation — the other tiers would present a different ua and re-trip the
+    // wall). The visible browse webview solves under the default Electron ua, so
+    // the pinned ua is ua:null (tier-1) and the shared persist:gbif jar carries it.
+    const cleared = state.cfCleared.get(host);
+    const tiers = cleared
+      ? [{ ua: cleared.ua || null, method: 'webview-cf' }]
+      : [{ ua: null, method: 'webview-electron' }];
+    if (!cleared) {
+      if (CLEAN_UA && CLEAN_UA !== navigator.userAgent) tiers.push({ ua: CLEAN_UA, method: 'webview-clean' });
+      if (REALISTIC_UA !== navigator.userAgent && REALISTIC_UA !== CLEAN_UA) tiers.push({ ua: REALISTIC_UA, method: 'webview-realistic' });
+    }
     const trail = [];
     for (const t of tiers) {
       if (opts.onAttempt) { try { opts.onAttempt(t.method); } catch (_) {} }
       try {
-        const dataUrl = await downloadViaWebview(imageUrl, t.ua ? { userAgent: t.ua } : {});
+        const dataUrl = await downloadViaWebview(imageUrl, { userAgent: t.ua || undefined, detectCf: true });
         trail.push({ method: t.method, outcome: 'success' });
         return { dataUrl, method: t.method, trail };
       } catch (e) {
+        if (e && e.cf) {
+          // Cloudflare wall. Don't waste the other UA tiers — surface it so the
+          // drain parks the row and asks the user to solve it once.
+          const err = new Error('cloudflare-gated');
+          err.kind = 'cf'; err.host = host; err.interactive = !!e.interactive;
+          err.trail = trail.concat([{ method: t.method, outcome: 'cf_challenge' }]);
+          throw err;
+        }
         const o = tierOutcome(e && e.message);
         trail.push({ method: t.method, outcome: o.outcome, http_status: o.http_status, message: e && e.message });
       }
@@ -558,16 +615,41 @@
     state.job.draining = true;
     state.webviewWorkers = Array.from({ length: WEBVIEW_WORKERS }, () => ({ current: null, prev: null }));
     await api.gbif.setCapture(true);
-    let queue = [];
-    const nextItem = async () => {
-      if (!queue.length) queue = await api.gbif.nextBlocked(key, 12);
-      return queue.shift() || null;
+
+    // The pool stays alive for the whole run: rows become 'blocked' gradually as the
+    // direct drain classifies them, so a worker that finds nothing WAITS and retries
+    // rather than exiting (exiting used to collapse the pool to a single active tile).
+    const jobActive = () => { const a = state.job.active; return !!(a && a.key === key && a.busy && !a.paused); };
+    const setIdle = (w) => {
+      if (state.webviewWorkers[w] && state.webviewWorkers[w].current) {
+        state.webviewWorkers[w] = { current: null, prev: state.webviewWorkers[w].prev }; renderWorkers();
+      }
     };
+
     const worker = async (w) => {
+      let idle = 0;
       while (true) {
-        const it = await nextItem();
-        if (!it) break;
-        state.webviewWorkers[w] = { current: { gbif_id: it.gbif_id, herbCode: it.herbCode, method: 'webview-electron', delayActive: false }, prev: (state.webviewWorkers[w] || {}).prev };
+        // Claim ONE row atomically per worker (main marks it in_progress). Per-worker
+        // claiming avoids the old shared-queue race that orphaned rows and let all but
+        // one worker exit.
+        let it = null;
+        try { const b = await api.gbif.nextBlocked(key, 1); it = b && b[0]; } catch (_) { /* retry */ }
+        if (!it) {
+          setIdle(w);
+          if (!jobActive()) { if (++idle >= 3) break; } else idle = 0;
+          await sleep(1200);
+          continue;
+        }
+        idle = 0;
+        const ihost = hostOf(it.image_url);
+        // Host awaiting a one-time human Cloudflare solve: park the row (back to
+        // blocked) and skip so we don't hammer the wall; it flows once cleared.
+        if (state.cfGated.has(ihost) && !state.cfCleared.has(ihost)) {
+          if (!state.cfSample.has(ihost)) { state.cfSample.set(ihost, it.image_url); renderCfBanner(); }
+          try { await api.gbif.requeueBlocked(key, it.gbif_id); } catch (_) {}
+          setIdle(w); await sleep(1500); continue;
+        }
+        state.webviewWorkers[w] = { current: { gbif_id: it.gbif_id, herbCode: it.herbCode, method: state.cfCleared.has(ihost) ? 'webview-cf' : 'webview-electron', delayActive: false }, prev: (state.webviewWorkers[w] || {}).prev };
         renderWorkers();
         let ok = false;
         try {
@@ -575,6 +657,14 @@
           await api.gbif.saveBlocked(key, it.gbif_id, r.dataUrl, r.method, r.trail);
           ok = true;
         } catch (e) {
+          if (e && e.kind === 'cf') {
+            // Cloudflare wall → mark the host gated, stash a sample URL, park the row
+            // (NOT a failure — it's resumable), and prompt a one-time solve.
+            state.cfGated.add(ihost);
+            if (!state.cfSample.has(ihost)) state.cfSample.set(ihost, it.image_url);
+            try { await api.gbif.requeueBlocked(key, it.gbif_id); } catch (_) {}
+            renderCfBanner(); setIdle(w); continue;
+          }
           await api.gbif.failBlocked(key, it.gbif_id, { kind: (e && e.kind) || 'failed', status: (e && e.status) || null, trail: (e && e.trail) || [] });
         }
         state.webviewWorkers[w] = { current: null, prev: { gbif_id: it.gbif_id, herbCode: it.herbCode, ok } };
@@ -586,6 +676,57 @@
     state.webviewWorkers = (state.webviewWorkers || []).map((w) => ({ current: null, prev: w.prev }));
     renderWorkers();
     state.job.draining = false;
+  }
+
+  // --- Cloudflare one-time human solve --------------------------------------
+  // mediaphoto.mnhn.fr (and friends) sit behind an INTERACTIVE Turnstile that can't
+  // be auto-solved. But solving it ONCE in the visible webview mints a cf_clearance
+  // cookie in persist:gbif; because the throwaway fetch webviews share that jar and
+  // the default Electron UA, the tier-1 fetch then succeeds. This banner walks the
+  // user through that single click, then retries the parked + previously-failed rows.
+  function renderCfBanner() {
+    const el = els.cfBanner;
+    if (!el) return;
+    const gated = [...state.cfGated].filter((h) => !state.cfCleared.has(h));
+    if (!gated.length) { el.hidden = true; el.innerHTML = ''; return; }
+    el.hidden = false;
+    el.innerHTML = gated.map((h) => {
+      const solving = state.cfSolving === h;
+      return `<div class="cf-row">
+        <span class="cf-msg">⚠ <b>${esc(h)}</b> is behind a Cloudflare human check. ${solving ? 'Pass the check in the browser above — downloads resume automatically…' : 'Open it, pass the check once, and the rest download themselves.'}</span>
+        <button class="btn ${solving ? 'ghost' : 'btn-go'} cf-solve" data-host="${esc(h)}" ${solving ? 'disabled' : ''}>${solving ? '◌ waiting…' : '▶ SOLVE CLOUDFLARE'}</button>
+      </div>`;
+    }).join('');
+    el.querySelectorAll('.cf-solve').forEach((b) => b.addEventListener('click', () => solveCf(b.dataset.host)));
+  }
+
+  async function solveCf(host) {
+    const sample = state.cfSample.get(host);
+    if (!sample || state.cfSolving) return;
+    state.cfSolving = host; renderCfBanner();
+    // Open the challenged image in the VISIBLE browse webview — a real top-level
+    // navigation so the Turnstile widget renders for a genuine human click.
+    try { state.view.stop(); } catch (_) {}
+    try { state.view.loadURL(sample); } catch (_) {}
+    setStatus(`solve the Cloudflare check for ${host} in the browser…`, 'work');
+    const deadline = Date.now() + 180000; // 3 min to click through
+    while (Date.now() < deadline && state.cfSolving === host) {
+      await sleep(1500);
+      let cleared = false;
+      try { cleared = await api.gbif.hasClearance(host); } catch (_) {}
+      if (!cleared) { try { const p = await state.view.executeJavaScript(CF_PROBE, true); if (p && p.state === 'image') cleared = true; } catch (_) {} }
+      if (cleared) {
+        state.cfCleared.set(host, { ua: navigator.userAgent }); // visible view == default Electron UA
+        state.cfGated.delete(host); state.cfSolving = null; renderCfBanner();
+        let reset = 0;
+        try { reset = await api.gbif.resetHostFailures(state.job.active.key, host); } catch (_) {}
+        setStatus(`${host} cleared — resuming${reset ? ` (${reset} retried)` : ''}`, 'ok');
+        toast(`${host} Cloudflare check passed — resuming downloads`, 'ok');
+        if (state.job.active) startBlockedDrain(state.job.active.key);
+        return;
+      }
+    }
+    if (state.cfSolving === host) { state.cfSolving = null; renderCfBanner(); setStatus(`Cloudflare solve for ${host} timed out — click SOLVE to retry`, 'error'); }
   }
 
   function onJobProgress(snap) {
@@ -602,6 +743,7 @@
       'webview-electron': '② Electron UA',
       'webview-clean': '③ Chrome face',
       'webview-realistic': '④ Realistic Chrome',
+      'webview-cf': '⑤ CF clearance',
     }[m] || (m || '');
   }
   function workerCard(w) {
@@ -661,6 +803,7 @@
     els.bm = document.getElementById('gbif-bm');
     els.bmMenu = document.getElementById('gbif-bm-menu');
     els.auth = document.getElementById('gbif-auth');
+    els.cfBanner = document.getElementById('gbif-cf-banner');
     els.job = document.getElementById('gbif-job');
     els.workers = document.getElementById('gbif-workers');
     els.progress = document.getElementById('gbif-progress');

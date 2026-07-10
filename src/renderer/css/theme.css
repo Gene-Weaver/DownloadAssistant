@@ -833,6 +833,13 @@ html, body {
 a.jtree-link { color: var(--green); text-decoration: underline; cursor: pointer; word-break: break-all; }
 a.jtree-link:hover { color: var(--amber); }
 
+/* Cloudflare one-time-solve banner (above the browse webview) */
+.gbif-cf-banner { display: flex; flex-direction: column; gap: 4px; padding: 6px 10px; background: rgba(255, 179, 0, 0.08); border: 1px solid rgba(255, 179, 0, 0.4); border-radius: 4px; margin: 4px 0; }
+.gbif-cf-banner .cf-row { display: flex; align-items: center; gap: 10px; }
+.gbif-cf-banner .cf-msg { flex: 1; font-size: 12px; color: var(--amber); }
+.gbif-cf-banner .cf-msg b { color: var(--fg); }
+.gbif-cf-banner .cf-solve { white-space: nowrap; }
+
 /* ===================== header worker-count control ===================== */
 .header-right { margin-left: auto; display: flex; align-items: center; gap: 12px; }
 .header-right .updater-bar { margin-left: 0; }

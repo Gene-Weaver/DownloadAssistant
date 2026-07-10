@@ -110,13 +110,13 @@ async function submit(searchUrl) {
 // the archive lands.
 async function startImmediateEnumerate(parentDir, key, searchUrl) {
   const job = jobs.get(key) || {}; job.parentDir = parentDir; jobs.set(key, job);
-  if (job.enumerating) return;
+  if (job.paused || job.enumerating) return;
   job.enumerating = true;
   const dbFile = dbFileFor(parentDir);
   startDrain(parentDir, key); // begin draining as soon as rows appear
   try {
     await gbifApi.enumerateAll(searchUrl, {
-      isCancelled: () => job.cancelled,
+      isCancelled: () => job.cancelled || job.paused,
       onBatch: async (rows) => {
         const batch = rows.map(({ occ, image_url }) => ({
           gbif_id: String(occ.key), download_key: key, image_url,
@@ -137,7 +137,9 @@ async function startImmediateEnumerate(parentDir, key, searchUrl) {
 // --- poll -----------------------------------------------------------------
 function startPoll(parentDir, key) {
   const job = jobs.get(key) || {};
-  job.parentDir = parentDir; job.cancelled = false;
+  job.parentDir = parentDir;
+  if (job.paused) return; // don't restart archive polling for an explicitly-paused job
+  job.cancelled = false;
   if (job.pollTimer) { jobs.set(key, job); return; }
 
   const tick = async () => {
@@ -226,7 +228,9 @@ function checkComplete(parentDir, key) {
 }
 
 async function startDrain(parentDir, key) {
-  const job = jobs.get(key) || {}; job.parentDir = parentDir; job.cancelled = false; jobs.set(key, job);
+  const job = jobs.get(key) || {}; job.parentDir = parentDir; jobs.set(key, job);
+  if (job.paused) return; // explicit pause blocks any (re)start (enqueue/enumerate/extract all call this)
+  job.cancelled = false;
   if (job.draining) return;
   job.draining = true;
   job.workerCount = settings.getWorkerCount(); // capture the pool size for this run
@@ -359,6 +363,18 @@ function failBlocked(parentDir, key, gbifId, info) {
   pushProgress(parentDir, key);
 }
 
+// Park a Cloudflare-gated row back to 'blocked' (resumable) instead of failing it,
+// so it retries after the host is cleared via the one-time human solve.
+function requeueBlocked(parentDir, key, gbifId) {
+  db.setQueueStatus(dbFileFor(parentDir), gbifId, 'blocked');
+}
+
+// After a host is cleared through Cloudflare, flip its previously-'failed' rows
+// back to 'blocked' so the webview drain retries them (now with cf_clearance).
+function resetHostFailures(parentDir, key, host) {
+  return db.requeueHostFailures(dbFileFor(parentDir), key, host);
+}
+
 // --- cancel / resume ------------------------------------------------------
 async function cancel(key) {
   const job = jobs.get(key);
@@ -378,8 +394,10 @@ async function cancel(key) {
 // Restart a paused image drain (renderer "resume" button).
 function resume(key) {
   const job = jobs.get(key) || {};
+  job.paused = false; job.cancelled = false; // explicit resume clears the sticky pause
   const parentDir = job.parentDir || settings.getParentDir();
   if (!parentDir) return;
+  jobs.set(key, job);
   startDrain(parentDir, key);
 }
 
@@ -394,7 +412,7 @@ async function resumeProject(parentDir) {
   db.resetInProgress(dbFile);
   for (const row of active) {
     const existing = jobs.get(row.key);
-    if (existing) existing.cancelled = false; // un-pause
+    if (existing) { existing.cancelled = false; existing.paused = false; } // un-pause
     const st = row.status;
     if (['PREPARING', 'RUNNING'].includes(st)) {
       startPoll(parentDir, row.key);
@@ -420,6 +438,11 @@ function pauseProject(parentDir) {
   let n = 0;
   for (const [, job] of jobs) {
     if (job.parentDir === parentDir) {
+      // Sticky pause: cancelled alone was being flipped back to false by the next
+      // startDrain() (enqueue/enumerate/extract all call it), so a single Pause
+      // press "didn't take". paused stays true until an explicit Resume, and every
+      // (re)start path bails while it's set.
+      job.paused = true;
       job.cancelled = true;
       if (job.pollTimer) { clearInterval(job.pollTimer); job.pollTimer = null; }
       n += 1;
@@ -444,8 +467,26 @@ function projectStatus(parentDir) {
   return { activeDownloads: downloads.length, counts: all, imageCount, running, paused: !running && hasWork };
 }
 
+// Startup = paused. Closing the app is treated as pressing Pause: we do NOT
+// auto-resume. We only un-orphan any in_progress rows (so a later Resume is
+// clean) and register each active download as paused, so the UI shows it as
+// resumable and Pause/Resume + status report correctly. Nothing drains/polls
+// until the user presses Resume.
 async function resumeOnStartup() {
-  await resumeProject(settings.getParentDir());
+  const parentDir = settings.getParentDir();
+  if (!parentDir) return;
+  try {
+    const dbFile = dbFileFor(parentDir);
+    db.resetInProgress(dbFile);
+    const active = db.getActiveDownloads(dbFile);
+    for (const row of active) {
+      const job = jobs.get(row.key) || {};
+      job.parentDir = parentDir; job.paused = true; job.cancelled = true;
+      jobs.set(row.key, job);
+    }
+    if (active.length) push('gbif:jobsActive', active.map((r) => r.key));
+    for (const row of active) pushProgress(parentDir, row.key);
+  } catch (_) { /* no db yet */ }
 }
 
 function listActive() {
@@ -458,5 +499,5 @@ function listActive() {
 module.exports = {
   init, submit, cancel, resume, resumeOnStartup, listActive,
   resumeProject, pauseProject, projectStatus,
-  nextBlocked, saveBlocked, failBlocked,
+  nextBlocked, saveBlocked, failBlocked, requeueBlocked, resetHostFailures,
 };

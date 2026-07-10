@@ -47,6 +47,9 @@ const api = {
     nextBlocked:   invoke('gbif:nextBlocked'),    // (key, limit) -> [{gbif_id,image_url}]
     saveBlocked:   invoke('gbif:saveBlocked'),    // (key, gbifId, dataUrl, method, trail)
     failBlocked:   invoke('gbif:failBlocked'),    // (key, gbifId, {kind,status,trail})
+    requeueBlocked:   invoke('gbif:requeueBlocked'),   // (key, gbifId) -> park a CF-gated row back to blocked
+    resetHostFailures: invoke('gbif:resetHostFailures'), // (key, host) -> count reset to blocked
+    hasClearance:     invoke('gbif:hasClearance'),      // (host) -> bool (cf_clearance cookie present)
     onJobProgress: (cb) => ipcRenderer.on('gbif:jobProgress', (_e, d) => cb(d)),
     onJobsActive:  (cb) => ipcRenderer.on('gbif:jobsActive',  (_e, d) => cb(d)),
     onWorkers:     (cb) => ipcRenderer.on('gbif:workers',     (_e, d) => cb(d)),

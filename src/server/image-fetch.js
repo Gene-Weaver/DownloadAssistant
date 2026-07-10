@@ -31,6 +31,25 @@ function fetchError(kind, outcome, status, message) {
   return e;
 }
 
+// Some GBIF media links point at an HTML VIEWER page, not the raw image. Rewrite
+// the known ones to their real full-resolution image URL so the fast direct path
+// downloads them (these hosts aren't bot-blocked — the link just isn't the image).
+// Returns a rewritten URL or null (leave as-is). Extend per host as we find them.
+function resolveLandingUrl(url) {
+  try {
+    const u = new URL(url);
+    const host = u.hostname.replace(/^www\./, '');
+    // sdplantatlas OpenSeadragon viewer:
+    //   /HiResDisplay/HiResZoomDisplay.aspx?H=2930
+    //   -> /Synoptic1/HighResDownload/H2930.jpg
+    if (host === 'sdplantatlas.org' && /HiResZoomDisplay\.aspx/i.test(u.pathname)) {
+      const h = u.searchParams.get('H');
+      if (h && /^\d+$/.test(h)) return `https://sdplantatlas.org/Synoptic1/HighResDownload/H${h}.jpg`;
+    }
+  } catch (_) { /* not a parseable URL */ }
+  return null;
+}
+
 // HTTP status -> classification.
 function classify(status) {
   // 404/410 = the file isn't there. The webview hits the SAME url and 404s too,
@@ -42,12 +61,13 @@ function classify(status) {
 
 // Returns a Buffer of image bytes, or throws a classified error (one attempt).
 async function tryDirect(url) {
+  const target = resolveLandingUrl(url) || url; // rewrite known viewer-page links
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), TIMEOUT_MS);
   try {
     let res;
     try {
-      res = await fetch(url, {
+      res = await fetch(target, {
         headers: { 'User-Agent': UA, Accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8' },
         redirect: 'follow',
         signal: ctl.signal,
@@ -73,4 +93,4 @@ async function tryDirect(url) {
   }
 }
 
-module.exports = { tryDirect, hostOf };
+module.exports = { tryDirect, hostOf, resolveLandingUrl };

@@ -189,6 +189,26 @@ function register(win) {
     if (pd) downloadJobs.failBlocked(pd, key, gbifId, info);
     return true;
   });
+  // Park a Cloudflare-gated row back to 'blocked' (resumable) instead of failing it.
+  ipcMain.handle('gbif:requeueBlocked', (_e, key, gbifId) => {
+    const pd = settings.getParentDir();
+    if (pd) downloadJobs.requeueBlocked(pd, key, gbifId);
+    return true;
+  });
+  // After a host is cleared through Cloudflare, retry its previously-failed rows.
+  ipcMain.handle('gbif:resetHostFailures', (_e, key, host) => {
+    const pd = settings.getParentDir();
+    return pd ? downloadJobs.resetHostFailures(pd, key, host) : 0;
+  });
+  // Does the shared browse session hold a cf_clearance cookie for this host yet?
+  ipcMain.handle('gbif:hasClearance', async (_e, host) => {
+    try {
+      const ses = require('electron').session.fromPartition('persist:gbif');
+      const cookies = await ses.cookies.get({ name: 'cf_clearance' });
+      const h = String(host || '');
+      return cookies.some((c) => { const d = (c.domain || '').replace(/^\./, ''); return d && (h === d || h.endsWith('.' + d) || d.endsWith('.' + h)); });
+    } catch (_) { return false; }
+  });
 
   // --- GBIF auth (webview JWT preferred; .env Basic fallback) -------------
   ipcMain.handle('auth:status', async () => { await authProvider.scanCookies(); return authProvider.status(); });

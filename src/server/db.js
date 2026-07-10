@@ -285,6 +285,16 @@ function nextQueueBatch(dbFile, { key, status = 'pending', limit = 500 } = {}) {
   return db.prepare(`SELECT * FROM download_queue WHERE ${where} ORDER BY RANDOM() LIMIT ?`).all(...args, limit);
 }
 
+// Flip a host's terminally-'failed' rows back to 'blocked' (webview-retryable).
+// Used after a Cloudflare host is cleared so its earlier failures get another go.
+// Leaves 'broken' (dead 404/410 links) alone. host is matched exactly.
+function requeueHostFailures(dbFile, key, host) {
+  return open(dbFile).prepare(
+    `UPDATE download_queue SET status='blocked', updated_at=datetime('now')
+     WHERE download_key = ? AND host = ? AND status = 'failed'`
+  ).run(String(key), String(host)).changes;
+}
+
 function setQueueStatus(dbFile, gbifId, status, err) {
   return open(dbFile).prepare(
     `UPDATE download_queue SET status=@status, last_error=@err, updated_at=datetime('now') WHERE gbif_id=@id`
@@ -397,6 +407,6 @@ module.exports = {
   open, hasImage, listDownloadedIds, upsertImage, count, schema, rows, getRow,
   insertDownload, updateDownload, getDownload, listDownloads, getActiveDownloads,
   enqueue, markSkippedAlreadyDownloaded, nextQueueBatch, setQueueStatus,
-  bumpQueueAttempt, queueCounts, resetInProgress,
+  requeueHostFailures, bumpQueueAttempt, queueCounts, resetInProgress,
   setQueueOutcome, logFetch, logFetchBatch, fetchStats, fetchLog,
 };
