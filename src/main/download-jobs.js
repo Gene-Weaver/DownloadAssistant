@@ -28,6 +28,7 @@ const { generateImageFilename } = require('../server/herb-code');
 const POLL_MS = 20000;
 const DRAIN_GLOBAL = 16;   // concurrent direct fetches (worker board shows each)
 const DRAIN_PER_HOST = 2;  // per institution host (be polite)
+const RATE_COOLDOWN_MS = 30000; // after a 429, rest this host this long before retrying
 
 function herbCodeOf(occ) { try { return generateImageFilename(occ, null).herbCode; } catch (_) { return ''; } }
 const EXTRACT = ['occurrence.txt', 'multimedia.txt', 'verbatim.txt', 'citations.txt', 'rights.txt', 'metadata.xml', 'meta.xml'];
@@ -260,14 +261,21 @@ async function drainPass(parentDir, key, job) {
   const hostInFlight = new Map();
   const inc = (h) => hostInFlight.set(h, (hostInFlight.get(h) || 0) + 1);
   const dec = (h) => hostInFlight.set(h, Math.max(0, (hostInFlight.get(h) || 0) - 1));
+  // Rate-limit memory persists across passes: hosts that returned 429 get capped to
+  // 1 concurrent (sensitive) and rested (cooldown) so we stop tripping the limit.
+  if (!job.hostCooldown) job.hostCooldown = new Map();
+  if (!job.hostSensitive) job.hostSensitive = new Set();
   let buffer = db.nextQueueBatch(dbFile, { key, status: 'pending', limit: 800 });
   let lastPush = 0;
 
-  // Atomically claim a buffered row whose host is under cap (no await → race-free).
+  // Atomically claim a buffered row whose host is under cap AND not cooling down
+  // (no await → race-free).
   const claim = () => {
+    const now = Date.now();
     for (let i = 0; i < buffer.length; i++) {
       const r = buffer[i];
-      if ((hostInFlight.get(r.host) || 0) < DRAIN_PER_HOST) {
+      const cap = job.hostSensitive.has(r.host) ? 1 : DRAIN_PER_HOST;
+      if (now >= (job.hostCooldown.get(r.host) || 0) && (hostInFlight.get(r.host) || 0) < cap) {
         buffer.splice(i, 1);
         db.setQueueStatus(dbFile, r.gbif_id, 'in_progress');
         return r;
@@ -307,7 +315,13 @@ async function drainPass(parentDir, key, job) {
       } catch (e) {
         db.logFetch(dbFile, { gbif_id: row.gbif_id, host: row.host, method: 'direct', outcome: e.outcome || 'error', http_status: e.status, message: e.message });
         const kind = e.kind || 'transient';
-        if (kind === 'blocked') db.setQueueOutcome(dbFile, row.gbif_id, { status: 'blocked', http_status: e.status, error: e.message }); // → webview drain
+        if (kind === 'ratelimited') {
+          // 429 → back the WHOLE host off (cap→1 + cooldown) and put the row back to
+          // pending so it retries later, slower. NOT the webview (shares our IP).
+          job.hostSensitive.add(row.host);
+          job.hostCooldown.set(row.host, Date.now() + RATE_COOLDOWN_MS);
+          db.setQueueStatus(dbFile, row.gbif_id, 'pending');
+        } else if (kind === 'blocked') db.setQueueOutcome(dbFile, row.gbif_id, { status: 'blocked', http_status: e.status, error: e.message }); // → webview drain
         else if (kind === 'broken') db.setQueueOutcome(dbFile, row.gbif_id, { status: 'broken', method: 'direct', http_status: e.status, error: e.message }); // dead link — never retry
         else db.setQueueOutcome(dbFile, row.gbif_id, { status: 'failed', method: 'direct', http_status: e.status, error: e.message }); // transient — retry later
       } finally {

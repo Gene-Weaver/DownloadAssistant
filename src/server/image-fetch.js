@@ -31,10 +31,10 @@ function fetchError(kind, outcome, status, message) {
   return e;
 }
 
-// Some GBIF media links point at an HTML VIEWER page, not the raw image. Rewrite
-// the known ones to their real full-resolution image URL so the fast direct path
-// downloads them (these hosts aren't bot-blocked — the link just isn't the image).
-// Returns a rewritten URL or null (leave as-is). Extend per host as we find them.
+// Some GBIF media links point at an HTML VIEWER page (or a dead legacy host), not
+// the raw image. Rewrite the known ones to their real full-resolution image URL so
+// the fast direct path downloads them. Returns { url, headers? } or null (as-is).
+// `headers` carries anything the target needs (e.g. a Referer). Extend per host.
 function resolveLandingUrl(url) {
   try {
     const u = new URL(url);
@@ -44,7 +44,19 @@ function resolveLandingUrl(url) {
     //   -> /Synoptic1/HighResDownload/H2930.jpg
     if (host === 'sdplantatlas.org' && /HiResZoomDisplay\.aspx/i.test(u.pathname)) {
       const h = u.searchParams.get('H');
-      if (h && /^\d+$/.test(h)) return `https://sdplantatlas.org/Synoptic1/HighResDownload/H${h}.jpg`;
+      if (h && /^\d+$/.test(h)) return { url: `https://sdplantatlas.org/Synoptic1/HighResDownload/H${h}.jpg` };
+    }
+    // Meise Botanic Garden (BR): the legacy oxalis image path 403s directly, but the
+    // IIIF image server serves the full-res jpg when asked with a botanicalcollections
+    // Referer. The image identifier IS the url-encoded oxalis path.
+    //   https://oxalis.br.fgov.be/images/V/BR0/000/027/642/375/BR0000027642375V.jpg
+    //   -> https://iiif-image.oxalis.br.fgov.be/iiif/3/<enc path>/full/max/0/default.jpg
+    if (host === 'oxalis.br.fgov.be' && u.pathname.startsWith('/images/')) {
+      const p = u.pathname.slice('/images/'.length);
+      if (p) return {
+        url: `https://iiif-image.oxalis.br.fgov.be/iiif/3/${encodeURIComponent(p)}/full/max/0/default.jpg`,
+        headers: { Referer: 'https://www.botanicalcollections.be/' },
+      };
     }
   } catch (_) { /* not a parseable URL */ }
   return null;
@@ -55,20 +67,25 @@ function classify(status) {
   // 404/410 = the file isn't there. The webview hits the SAME url and 404s too,
   // so treat it as broken (never retry) — e.g. BRY's ~320k dead *_lg.jpg urls.
   if (status === 410 || status === 404) return 'broken';
-  if ([401, 403, 429, 503].includes(status)) return 'blocked';
+  // 429 = rate limited. The webview shares our IP, so it'd be throttled too —
+  // don't route it there; back the whole host off and retry later (see drain).
+  if (status === 429) return 'ratelimited';
+  if ([401, 403, 503].includes(status)) return 'blocked';
   return 'transient'; // other 4xx/5xx
 }
 
 // Returns a Buffer of image bytes, or throws a classified error (one attempt).
 async function tryDirect(url) {
-  const target = resolveLandingUrl(url) || url; // rewrite known viewer-page links
+  const resolved = resolveLandingUrl(url); // rewrite known viewer-page / legacy links
+  const target = resolved ? resolved.url : url;
+  const extra = (resolved && resolved.headers) || {};
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), TIMEOUT_MS);
   try {
     let res;
     try {
       res = await fetch(target, {
-        headers: { 'User-Agent': UA, Accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8' },
+        headers: { 'User-Agent': UA, Accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8', ...extra },
         redirect: 'follow',
         signal: ctl.signal,
       });
@@ -79,7 +96,7 @@ async function tryDirect(url) {
       throw fetchError('transient', 'error', null, code || (e && e.message) || 'network error');
     }
     if (!res.ok) {
-      const outcome = [401, 403, 429, 503].includes(res.status) ? 'blocked' : ((res.status === 410 || res.status === 404) ? 'broken' : 'http_error');
+      const outcome = res.status === 429 ? 'ratelimited' : ([401, 403, 503].includes(res.status) ? 'blocked' : ((res.status === 410 || res.status === 404) ? 'broken' : 'http_error'));
       throw fetchError(classify(res.status), outcome, res.status, `http ${res.status}`);
     }
     const ct = (res.headers.get('content-type') || '').toLowerCase();
