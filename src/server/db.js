@@ -295,6 +295,15 @@ function requeueHostFailures(dbFile, key, host) {
   ).run(String(key), String(host)).changes;
 }
 
+// Requeue every terminally-'failed' row back to 'pending' for a fresh full retry
+// (direct → webview). Deliberately leaves 'broken' (dead 404/410 links) alone.
+// Used by the Viewer's "requeue failures" button after fixing a host/resolver.
+function requeueFailed(dbFile) {
+  return open(dbFile).prepare(
+    "UPDATE download_queue SET status='pending', updated_at=datetime('now') WHERE status='failed'"
+  ).run().changes;
+}
+
 function setQueueStatus(dbFile, gbifId, status, err) {
   return open(dbFile).prepare(
     `UPDATE download_queue SET status=@status, last_error=@err, updated_at=datetime('now') WHERE gbif_id=@id`
@@ -407,6 +416,6 @@ module.exports = {
   open, hasImage, listDownloadedIds, upsertImage, count, schema, rows, getRow,
   insertDownload, updateDownload, getDownload, listDownloads, getActiveDownloads,
   enqueue, markSkippedAlreadyDownloaded, nextQueueBatch, setQueueStatus,
-  requeueHostFailures, bumpQueueAttempt, queueCounts, resetInProgress,
+  requeueHostFailures, requeueFailed, bumpQueueAttempt, queueCounts, resetInProgress,
   setQueueOutcome, logFetch, logFetchBatch, fetchStats, fetchLog,
 };

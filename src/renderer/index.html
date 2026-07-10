@@ -123,6 +123,7 @@
           </select>
           <label class="vw-failonly mono" id="vw-failonly" hidden><input type="checkbox" id="vw-failonly-cb" checked /> failures only</label>
           <label class="vw-failonly mono" id="vw-finalonly" hidden title="Only items that failed the direct fetch AND every webview fallback — the truly problematic domains"><input type="checkbox" id="vw-finalonly-cb" /> terminal only</label>
+          <button id="vw-requeue" class="btn ghost sm" hidden title="Set all 'failed' rows back to pending for a fresh retry (leaves dead 404 'broken' links). Picked up on the next Resume.">⟲ REQUEUE FAILURES</button>
           <input id="vw-search" class="input mono vw-search" placeholder="filter rows…" spellcheck="false" autocomplete="off" />
           <div class="spacer"></div>
           <span id="vw-count" class="vw-count mono"></span>

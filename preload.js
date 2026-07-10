@@ -67,8 +67,9 @@ const api = {
     dwcRows:         invoke('viewer:dwcRows'),         // (slug, file, {limit,offset,search}) -> { columns, rows, total, limit, offset }
     imageByFilename: invoke('viewer:imageByFilename'), // (filename, maxDim?) -> { dataUrl, width, height } | null
     imageByGbifId:   invoke('viewer:imageByGbifId'),   // (gbifId, maxDim?) -> { dataUrl, width, height, filename } | null
-    fetchLog:        invoke('viewer:fetchLog'),        // ({limit,offset,search,onlyFailures}) -> { rows, total, limit, offset }
+    fetchLog:        invoke('viewer:fetchLog'),        // ({limit,offset,search,onlyFailures,finalOnly}) -> { rows, total, limit, offset }
     fetchStats:      invoke('viewer:fetchStats'),      // () -> { byHost, winners }
+    requeueFailed:   invoke('viewer:requeueFailed'),   // () -> count reset failed->pending (leaves broken 404s)
   },
   bookmarks: {
     list:   invoke('bookmarks:list'),   // (domain) -> [{ id, url, label, created_at }]

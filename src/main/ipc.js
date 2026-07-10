@@ -274,6 +274,12 @@ function register(win) {
     if (!pd) return { byHost: [], winners: [] };
     return db.fetchStats(dbFileFor(pd));
   });
+  // Requeue all 'failed' rows -> 'pending' (leaves dead 404 'broken' rows). Picked
+  // up on the next Resume. Returns how many were requeued.
+  ipcMain.handle('viewer:requeueFailed', () => {
+    const pd = settings.getParentDir();
+    return pd ? db.requeueFailed(dbFileFor(pd)) : 0;
+  });
 }
 
 module.exports = { register };

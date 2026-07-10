@@ -14,6 +14,7 @@
 (function () {
   const api = window.DA.api;
   const esc = window.DA.ui.esc;
+  const toast = window.DA.ui.toast;
 
   const state = {
     src: 'db', folder: null, file: 'occurrence.csv', search: '',
@@ -302,6 +303,7 @@
     els.folder.hidden = true; els.file.hidden = true; els.schema.hidden = false;
     if (els.failOnly) els.failOnly.hidden = true;
     if (els.finalOnly) els.finalOnly.hidden = true;
+    if (els.requeue) els.requeue.hidden = true;
     try { const info = await api.viewer.dbSchema(); renderSchema(info.columns, info.rowCount); }
     catch (_) { els.schema.innerHTML = ''; }
     await loadDbRows();
@@ -320,6 +322,7 @@
     els.folder.hidden = false; els.file.hidden = false;
     if (els.failOnly) els.failOnly.hidden = true;
     if (els.finalOnly) els.finalOnly.hidden = true;
+    if (els.requeue) els.requeue.hidden = true;
     if (reloadFolders) {
       const folders = await api.viewer.listDwc();
       state.folders = folders;
@@ -365,6 +368,7 @@
     els.schema.hidden = false;
     if (els.failOnly) els.failOnly.hidden = false;
     if (els.finalOnly) els.finalOnly.hidden = false;
+    if (els.requeue) els.requeue.hidden = false;
     try { renderFetchSummary(await api.viewer.fetchStats()); }
     catch (_) { els.schema.innerHTML = ''; }
     await loadFetchLogRows();
@@ -425,6 +429,7 @@
       els.folder.hidden = true; els.file.hidden = true;
       if (els.failOnly) els.failOnly.hidden = true;
     if (els.finalOnly) els.finalOnly.hidden = true;
+    if (els.requeue) els.requeue.hidden = true;
       renderEmpty('◍ set a save location above to browse downloaded data');
       clearJson(); clearImage();
       els.count.textContent = ''; setPager(0, 0, 0);
@@ -449,6 +454,7 @@
     els.failOnlyCb = document.getElementById('vw-failonly-cb');
     els.finalOnly = document.getElementById('vw-finalonly');
     els.finalOnlyCb = document.getElementById('vw-finalonly-cb');
+    els.requeue = document.getElementById('vw-requeue');
     els.search = document.getElementById('vw-search');
     els.count = document.getElementById('vw-count');
     els.refresh = document.getElementById('vw-refresh');
@@ -467,6 +473,16 @@
     els.file.addEventListener('change', () => { state.file = els.file.value; state.page = 0; loadDwcRows(); });
     els.failOnlyCb.addEventListener('change', () => { state.onlyFailures = els.failOnlyCb.checked; state.page = 0; loadFetchLogRows(); });
     els.finalOnlyCb.addEventListener('change', () => { state.finalOnly = els.finalOnlyCb.checked; state.page = 0; loadFetchLogRows(); });
+    els.requeue.addEventListener('click', async () => {
+      els.requeue.disabled = true;
+      try {
+        const n = await api.viewer.requeueFailed();
+        toast(n ? `Requeued ${n.toLocaleString()} failed item(s) → pending. Press Resume to retry.` : 'No failed items to requeue (broken 404s are left as-is).', n ? 'ok' : 'info');
+        try { renderFetchSummary(await api.viewer.fetchStats()); } catch (_) { /* noop */ }
+        await loadFetchLogRows();
+      } catch (e) { toast(e.message || 'Requeue failed.', 'error'); }
+      finally { els.requeue.disabled = false; }
+    });
     els.search.addEventListener('input', () => {
       clearTimeout(searchTimer);
       searchTimer = setTimeout(() => { state.search = els.search.value.trim(); state.page = 0; reloadRows(); }, 250);
