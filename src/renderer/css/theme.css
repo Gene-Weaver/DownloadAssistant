@@ -381,12 +381,11 @@ html, body {
   box-shadow: 0 0 24px rgba(0,0,0,0.6), 0 0 12px rgba(51,255,102,0.12);
 }
 
-/* live worker board: 2 rows, columns = ceil(workers/2) */
+/* live worker board: rows/cols set per grid; last row stretches to fill */
 .gbif-workers {
-  display: grid;
-  grid-template-columns: repeat(var(--wcols, 8), 1fr);
-  grid-auto-rows: 1fr;
-  gap: 5px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
   overflow: auto;
   padding: 8px;
   background: rgba(4, 7, 12, 0.92);
@@ -394,7 +393,12 @@ html, body {
   border-radius: 3px;
   box-shadow: 0 0 24px rgba(0,0,0,0.6);
 }
+.wk-grid { display: flex; flex-wrap: wrap; gap: 5px; align-items: stretch; }
+.wk-weblabel { color: var(--cyan); font-size: 9px; letter-spacing: 1.5px; opacity: 0.85; }
 .wk-card {
+  /* exactly --wcols per row; flex-grow lets a partial last row fill the width,
+     flex-shrink:0 stops an extra tile squeezing in (2px slack absorbs rounding) */
+  flex: 1 0 calc((100% - (var(--wcols, 8) - 1) * 5px - 2px) / var(--wcols, 8));
   border: 1px solid var(--green-line);
   border-radius: 2px;
   padding: 5px 6px;
@@ -405,6 +409,7 @@ html, body {
   min-width: 0;
   overflow: hidden;
 }
+.wk-web .wk-card { border-color: var(--green-dim); background: rgba(53, 224, 232, 0.04); }
 .wk-card.busy { border-color: var(--green-dim); background: rgba(51, 255, 102, 0.06); }
 .wk-item, .wk-previtem { color: var(--green-soft); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .wk-method { color: var(--cyan); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

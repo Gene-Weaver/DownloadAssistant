@@ -621,16 +621,27 @@
       <div class="wk-previtem">${prevItem}</div>
     </div>`;
   }
+  // 2 rows up to 16 workers, 3 rows beyond that; columns fit the count so the
+  // last row stretches to fill (no empty tiles). 24→8×3, 20→7×3, 16→8×2.
+  function gridCols(n) {
+    const rows = n <= 16 ? 2 : 3;
+    return Math.max(1, Math.ceil(n / rows));
+  }
+  function gridHtml(workers, cls) {
+    return `<div class="wk-grid ${cls || ''}" style="--wcols:${gridCols(workers.length)}">${workers.map(workerCard).join('')}</div>`;
+  }
   function renderWorkers() {
     const el = els.workers;
     if (!el) return;
-    const all = (state.directWorkers || []).concat(state.webviewWorkers || []);
-    const anyBusy = all.some((w) => w && w.current);
-    const jobBusy = state.job.active && state.job.active.busy;
-    if (!all.length || (!anyBusy && !jobBusy)) { el.hidden = true; return; }
+    const direct = state.directWorkers || [];
+    const web = (state.webviewWorkers || []).filter((w) => w && (w.current || w.prev));
+    const anyBusy = direct.some((w) => w && w.current) || web.some((w) => w.current);
+    const jobBusy = state.job.active && state.job.active.busy && !state.job.active.paused;
+    if (!direct.length || (!anyBusy && !jobBusy)) { el.hidden = true; return; }
     el.hidden = false;
-    el.style.setProperty('--wcols', Math.max(1, Math.ceil(all.length / 2)));
-    el.innerHTML = all.map(workerCard).join('');
+    let html = gridHtml(direct);
+    if (web.length) html += `<div class="wk-weblabel mono">browser fallback</div>${gridHtml(web, 'wk-web')}`;
+    el.innerHTML = html;
   }
 
   function wire() {
