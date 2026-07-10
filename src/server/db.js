@@ -339,15 +339,19 @@ function logFetchBatch(dbFile, entries) {
 }
 
 // Paginated + searchable raw fetch_log (most recent first). onlyFailures hides
-// the 'success' rows.
-function fetchLog(dbFile, { limit = 100, offset = 0, search = '', onlyFailures = false } = {}) {
+// the 'success' rows; finalOnly keeps only attempts whose item TERMINALLY failed
+// — direct + every webview fallback exhausted (queue status broken|failed), i.e.
+// the genuinely problematic domains (excludes 'blocked' items still awaiting the
+// webview drain and items that eventually succeeded).
+function fetchLog(dbFile, { limit = 100, offset = 0, search = '', onlyFailures = false, finalOnly = false } = {}) {
   const db = open(dbFile);
   const lim = Math.min(Math.max(1, limit | 0), 500);
   const off = Math.max(0, offset | 0);
   const clauses = [];
   const params = [];
   // host/gbif_id/method live in BOTH joined tables, so every column is qualified.
-  if (onlyFailures) clauses.push("f.outcome != 'success'");
+  if (finalOnly) clauses.push("q.status IN ('broken','failed')");
+  else if (onlyFailures) clauses.push("f.outcome != 'success'");
   const term = String(search || '').trim();
   if (term) {
     clauses.push('(f.host LIKE ? OR f.gbif_id LIKE ? OR f.method LIKE ? OR f.outcome LIKE ? OR q.image_url LIKE ?)');

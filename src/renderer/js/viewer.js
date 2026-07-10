@@ -19,7 +19,7 @@
     src: 'db', folder: null, file: 'occurrence.csv', search: '',
     page: 0, pageSize: 100, total: 0,
     parentReady: false, mounted: false, imgToken: 0,
-    rows: [], selectedIndex: -1, folders: [], onlyFailures: true,
+    rows: [], selectedIndex: -1, folders: [], onlyFailures: true, finalOnly: false,
   };
   const els = {};
   let searchTimer = null;
@@ -301,6 +301,7 @@
   async function loadDb() {
     els.folder.hidden = true; els.file.hidden = true; els.schema.hidden = false;
     if (els.failOnly) els.failOnly.hidden = true;
+    if (els.finalOnly) els.finalOnly.hidden = true;
     try { const info = await api.viewer.dbSchema(); renderSchema(info.columns, info.rowCount); }
     catch (_) { els.schema.innerHTML = ''; }
     await loadDbRows();
@@ -318,6 +319,7 @@
     els.schema.hidden = true; els.schema.innerHTML = '';
     els.folder.hidden = false; els.file.hidden = false;
     if (els.failOnly) els.failOnly.hidden = true;
+    if (els.finalOnly) els.finalOnly.hidden = true;
     if (reloadFolders) {
       const folders = await api.viewer.listDwc();
       state.folders = folders;
@@ -362,6 +364,7 @@
     els.folder.hidden = true; els.file.hidden = true;
     els.schema.hidden = false;
     if (els.failOnly) els.failOnly.hidden = false;
+    if (els.finalOnly) els.finalOnly.hidden = false;
     try { renderFetchSummary(await api.viewer.fetchStats()); }
     catch (_) { els.schema.innerHTML = ''; }
     await loadFetchLogRows();
@@ -386,11 +389,12 @@
   }
 
   async function loadFetchLogRows() {
-    const res = await api.viewer.fetchLog({ limit: state.pageSize, offset: state.page * state.pageSize, search: state.search, onlyFailures: state.onlyFailures });
+    const res = await api.viewer.fetchLog({ limit: state.pageSize, offset: state.page * state.pageSize, search: state.search, onlyFailures: state.onlyFailures, finalOnly: state.finalOnly });
     state.total = res.total;
-    if (!res.rows.length) renderEmpty(state.onlyFailures ? '— no failures logged —' : '— no fetch attempts logged —');
+    const noun = state.finalOnly ? 'terminal failure' : state.onlyFailures ? 'failure' : 'attempt';
+    if (!res.rows.length) renderEmpty(`— no ${noun}s logged —`);
     else renderRows(res.rows);
-    els.count.textContent = `${res.total.toLocaleString()} ${state.onlyFailures ? 'failure' : 'attempt'}(s)`;
+    els.count.textContent = `${res.total.toLocaleString()} ${noun}(s)`;
     setPager(res.offset, res.rows.length, res.total);
   }
 
@@ -420,6 +424,7 @@
       els.schema.innerHTML = ''; els.schema.hidden = true;
       els.folder.hidden = true; els.file.hidden = true;
       if (els.failOnly) els.failOnly.hidden = true;
+    if (els.finalOnly) els.finalOnly.hidden = true;
       renderEmpty('◍ set a save location above to browse downloaded data');
       clearJson(); clearImage();
       els.count.textContent = ''; setPager(0, 0, 0);
@@ -442,6 +447,8 @@
     els.file = document.getElementById('vw-file');
     els.failOnly = document.getElementById('vw-failonly');
     els.failOnlyCb = document.getElementById('vw-failonly-cb');
+    els.finalOnly = document.getElementById('vw-finalonly');
+    els.finalOnlyCb = document.getElementById('vw-finalonly-cb');
     els.search = document.getElementById('vw-search');
     els.count = document.getElementById('vw-count');
     els.refresh = document.getElementById('vw-refresh');
@@ -459,6 +466,7 @@
     els.folder.addEventListener('change', () => { state.folder = els.folder.value; state.page = 0; updateFileOptions(); loadDwcRows(); });
     els.file.addEventListener('change', () => { state.file = els.file.value; state.page = 0; loadDwcRows(); });
     els.failOnlyCb.addEventListener('change', () => { state.onlyFailures = els.failOnlyCb.checked; state.page = 0; loadFetchLogRows(); });
+    els.finalOnlyCb.addEventListener('change', () => { state.finalOnly = els.finalOnlyCb.checked; state.page = 0; loadFetchLogRows(); });
     els.search.addEventListener('input', () => {
       clearTimeout(searchTimer);
       searchTimer = setTimeout(() => { state.search = els.search.value.trim(); state.page = 0; reloadRows(); }, 250);
