@@ -42,7 +42,19 @@
     view: null, currentId: null, onSearch: false, busy: false,
     parentReady: false, bulk: { running: false, cancel: false },
     bookmarks: [], menuOpen: false, enumerating: false,
+    authStatus: { available: false }, job: { active: null, draining: false }, tokenTimer: null,
   };
+
+  // Best-effort scan of the logged-in GBIF webview session for a JWT (three
+  // base64url segments), incl. tokens nested in stored JSON. Lets us reuse the
+  // browser login for the download API with no stored password.
+  const JWT_SCAN = `(() => {
+    const isJwt = (v) => typeof v === 'string' && /^[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}$/.test(v);
+    const out = [];
+    const scan = (store) => { try { for (let i=0;i<store.length;i++){ const val = store.getItem(store.key(i)); if(!val) continue; if(isJwt(val)) out.push(val); else if(val[0]==='{'||val[0]==='['){ try{ JSON.stringify(JSON.parse(val), (k,v)=>{ if(isJwt(v)) out.push(v); return v; }); }catch(e){} } } } catch(e){} };
+    scan(window.localStorage); scan(window.sessionStorage);
+    return out[0] || null;
+  })()`;
   const els = {};
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   // getURL() throws if the webview isn't attached + dom-ready yet (e.g. the app
@@ -177,12 +189,27 @@
     return a.slice(0, Math.max(0, Math.min(n, a.length)));
   }
 
+  // ACQUIRE SEARCH: full DwC-A download (every record + DOI, past the offset
+  // wall) when signed in to GBIF; otherwise today's quick, capped path.
   async function importFromSearch() {
     if (state.busy || state.bulk.running || !state.parentReady) return;
-    const url = state.view && safeGetURL();
-    if (!/\/occurrence\/(search|gallery)/.test(url || '')) {
-      toast('Open a GBIF search (gallery) first.', 'error'); return;
+    const url = safeGetURL();
+    if (!/\/occurrence\/(search|gallery)/.test(url || '')) { toast('Open a GBIF search (gallery) first.', 'error'); return; }
+    let st = state.authStatus;
+    try { st = await api.auth.status(); state.authStatus = st; refreshAuthChip(); } catch (_) {}
+    if (st && st.available) {
+      try {
+        const res = await api.gbif.acquireSearch(url);
+        toast(`Full GBIF download requested${res && res.doi ? ` · DOI ${res.doi}` : ''} — images will download in the background.`, 'ok');
+      } catch (err) { toast((err && err.message) || 'Could not start the download.', 'error'); }
+      return;
     }
+    toast('Not signed in to GBIF — running a quick capped download. Log into GBIF here (or add a .env) for the complete archive + DOI.', 'info');
+    quickImport();
+  }
+
+  async function quickImport() {
+    const url = safeGetURL();
     state.busy = true; state.enumerating = true; updateActionButtons();
     setStatus('enumerating search results…', 'work');
     let res;
@@ -401,6 +428,107 @@
     toggleMenu(false);
   }
 
+  // --- GBIF account / auth for the full download --------------------------
+  async function refreshAuthChip() {
+    try { state.authStatus = await api.auth.status(); }
+    catch (_) { state.authStatus = { available: false }; }
+    const el = els.auth;
+    if (!el) return;
+    if (state.authStatus.available) {
+      el.textContent = `⚿ ${state.authStatus.username || 'signed in'} · full download ready`;
+      el.className = 'gbif-auth mono ok';
+    } else if (state.authStatus.webviewRejected) {
+      el.textContent = '⚿ GBIF won’t accept the browser login — add GBIF_USER/GBIF_PASS to .env';
+      el.className = 'gbif-auth mono warn';
+      el.title = 'GBIF’s website token is not accepted by its download API. Put your GBIF username + password in a .env file (gitignored) for the full download.';
+    } else {
+      el.textContent = '⚿ add GBIF_USER/GBIF_PASS to .env for full downloads';
+      el.className = 'gbif-auth mono';
+    }
+  }
+
+  // Lift a JWT from the logged-in GBIF session and hand it to main (no password).
+  async function scanForToken() {
+    try {
+      if (!/gbif\.org/.test(safeGetURL())) return;
+      const token = await state.view.executeJavaScript(JWT_SCAN, true);
+      if (token) { await api.auth.setToken(token); refreshAuthChip(); }
+    } catch (_) { /* best-effort */ }
+  }
+  function scheduleTokenScan() {
+    clearTimeout(state.tokenTimer);
+    state.tokenTimer = setTimeout(scanForToken, 800);
+  }
+
+  // --- bulk-download job card ---------------------------------------------
+  function jobPhaseLabel(status) {
+    switch (status) {
+      case 'PREPARING': return '◐ GBIF is preparing the archive…';
+      case 'RUNNING': return '◑ GBIF is building the archive…';
+      case 'DOWNLOADING_ZIP': return '⤓ downloading Darwin Core archive…';
+      case 'PARSING': return '⚙ reading Darwin Core…';
+      case 'QUEUED': return '▚ acquiring images…';
+      case 'DONE': return '▓ download complete';
+      case 'FAILED': return '✗ download failed';
+      case 'KILLED': case 'CANCELLED': return '✗ cancelled';
+      case 'FILE_ERASED': return '✗ archive expired on GBIF — re-request';
+      default: return status || '';
+    }
+  }
+
+  function renderJob(snap) {
+    const el = els.job;
+    if (!el) return;
+    if (!snap || !snap.key) { el.hidden = true; return; }
+    el.hidden = false;
+    const c = snap.counts || {};
+    const imaging = snap.status === 'QUEUED' || snap.status === 'DONE';
+    const total = snap.total_records != null ? `${Number(snap.total_records).toLocaleString()} records` : '';
+    const doi = snap.doi ? `<span class="job-doi" data-doi="${esc(snap.doi)}" title="Open DOI">DOI ${esc(snap.doi)}</span>` : '';
+    const settled = (c.done || 0) + (c.skipped || 0) + (c.failed || 0);
+    const pct = imaging && c.total ? Math.round((settled / c.total) * 100) : null;
+    const imgLine = imaging
+      ? `<div class="job-sub mono">images: ${c.done || 0}/${c.total || 0}${c.blocked ? ` · ${c.blocked} via browser` : ''}${c.failed ? ` · ${c.failed} failed` : ''}${c.skipped ? ` · ${c.skipped} already had` : ''}</div>`
+      : '';
+    el.innerHTML = `
+      <div class="job-head mono">
+        <span class="job-phase">${esc(jobPhaseLabel(snap.status))}</span>
+        <span class="job-meta">${total} ${doi}</span>
+        <button class="btn ghost sm" id="gbif-job-close">${snap.status === 'DONE' ? '✕ CLOSE' : '✕ CANCEL'}</button>
+      </div>
+      ${pct != null ? `<div class="gbif-progress-track"><div class="gbif-progress-fill" style="width:${pct}%"></div></div>` : ''}
+      ${imgLine}`;
+    const btn = el.querySelector('#gbif-job-close');
+    if (btn) btn.addEventListener('click', () => {
+      if (snap.status === 'DONE') el.hidden = true; else api.gbif.cancelJob(snap.key);
+    });
+    const doiEl = el.querySelector('.job-doi');
+    if (doiEl) doiEl.addEventListener('click', () => { try { window.open(`https://doi.org/${snap.doi}`); } catch (_) {} });
+  }
+
+  // Drain rows a host bot-blocked (tier-2) through the webview session.
+  async function startBlockedDrain(key) {
+    if (state.job.draining) return;
+    state.job.draining = true;
+    await api.gbif.setCapture(true);
+    try {
+      while (true) {
+        const batch = await api.gbif.nextBlocked(key, 8);
+        if (!batch || !batch.length) break;
+        await Promise.all(batch.map(async (it) => {
+          try { const dataUrl = await fetchImageBytes(it.image_url); await api.gbif.saveBlocked(key, it.gbif_id, dataUrl); }
+          catch (_) { await api.gbif.failBlocked(key, it.gbif_id, 'webview fetch failed'); }
+        }));
+      }
+    } finally { await api.gbif.setCapture(false); state.job.draining = false; }
+  }
+
+  function onJobProgress(snap) {
+    state.job.active = snap;
+    renderJob(snap);
+    if (snap && snap.counts && snap.counts.blocked > 0) startBlockedDrain(snap.key);
+  }
+
   function wire() {
     els.status = document.getElementById('gbif-status');
     els.add = document.getElementById('gbif-add');
@@ -408,6 +536,8 @@
     els.url = document.getElementById('gbif-url');
     els.bm = document.getElementById('gbif-bm');
     els.bmMenu = document.getElementById('gbif-bm-menu');
+    els.auth = document.getElementById('gbif-auth');
+    els.job = document.getElementById('gbif-job');
     els.progress = document.getElementById('gbif-progress');
     els.progressText = document.getElementById('gbif-progress-text');
     els.progressSub = document.getElementById('gbif-progress-sub');
@@ -440,9 +570,9 @@
       view.loadURL(v);
     });
 
-    view.addEventListener('did-navigate', (e) => onNav(e.url));
+    view.addEventListener('did-navigate', (e) => { onNav(e.url); scheduleTokenScan(); });
     view.addEventListener('did-navigate-in-page', (e) => onNav(e.url));
-    view.addEventListener('did-stop-loading', () => onNav(safeGetURL()));
+    view.addEventListener('did-stop-loading', () => { onNav(safeGetURL()); scheduleTokenScan(); });
     view.addEventListener('page-title-updated', () => onNav(safeGetURL()));
   }
 
@@ -453,10 +583,20 @@
       if (!state.enumerating) return;
       setStatus(`enumerating… ${found}${total ? ` of ${Number(total).toLocaleString()}` : ''} found`, 'work');
     });
+    // Background bulk-download job progress + resumed jobs on startup.
+    api.gbif.onJobProgress(onJobProgress);
+    api.gbif.onJobsActive(async () => {
+      try {
+        const jobs = await api.gbif.listJobs();
+        if (jobs && jobs[0]) onJobProgress(jobs[0]);
+      } catch (_) { /* noop */ }
+    });
     wire();
     updateActionButtons();
     onNav(safeGetURL());
     loadBookmarks();
+    refreshAuthChip();
+    scheduleTokenScan();
   }
 
   window.DA = window.DA || {};

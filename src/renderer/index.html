@@ -57,6 +57,7 @@
       <section id="tab-gbif" class="tab-panel active" role="tabpanel">
         <div class="gbif-toolbar">
           <span class="gbif-status mono" id="gbif-status">▶ browse gbif.org — click a specimen to lock a target</span>
+          <span class="gbif-auth mono" id="gbif-auth" title="GBIF account — needed for the full Darwin Core download + DOI"></span>
           <div class="spacer"></div>
           <div class="split-btn" id="gbif-bm">
             <button class="btn ghost split-main" id="gbif-bm-add" title="Save the current GBIF search">☆ BOOKMARK</button>
@@ -88,6 +89,8 @@
             <div class="gbif-progress-track"><div class="gbif-progress-fill" id="gbif-progress-fill"></div></div>
             <div class="gbif-progress-sub mono" id="gbif-progress-sub"></div>
           </div>
+
+          <div class="gbif-job" id="gbif-job" hidden></div>
         </div>
       </section>
 

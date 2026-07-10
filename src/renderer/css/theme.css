@@ -358,6 +358,28 @@ html, body {
 @keyframes march { to { background-position: 28px 0; } }
 .gbif-progress-sub { color: var(--muted); font-size: 11px; margin-top: 8px; }
 
+/* GBIF account chip + bulk-download job card */
+.gbif-auth { font-size: 11px; color: var(--muted); letter-spacing: 0.3px; white-space: nowrap; max-width: 44ch; overflow: hidden; text-overflow: ellipsis; }
+.gbif-auth.ok { color: var(--green); text-shadow: 0 0 4px rgba(51,255,102,0.4); }
+.gbif-auth.warn { color: var(--amber); }
+.gbif-job {
+  position: absolute;
+  left: 16px; right: 16px; bottom: 16px;
+  background: var(--bg-panel);
+  border: 1px solid var(--green-dim);
+  border-radius: 3px;
+  padding: 12px 14px;
+  box-shadow: 0 0 24px rgba(0,0,0,0.6), 0 0 12px rgba(51,255,102,0.12);
+}
+.job-head { display: flex; align-items: center; gap: 12px; color: var(--green); letter-spacing: 0.5px; }
+.job-phase { flex: 1; }
+.job-meta { color: var(--muted); font-size: 11px; white-space: nowrap; }
+.job-doi { color: var(--cyan); cursor: pointer; margin-left: 6px; }
+.job-doi:hover { text-shadow: var(--glow); }
+.job-sub { color: var(--muted); font-size: 11px; margin-top: 8px; }
+.btn.sm { padding: 3px 9px; font-size: 11px; }
+.gbif-job .gbif-progress-track { margin-top: 8px; }
+
 /* ============================== toasts ================================= */
 #toast-root {
   position: fixed;

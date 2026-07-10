@@ -30,6 +30,22 @@ const api = {
     // main -> renderer push channels
     onDownload:    (cb) => ipcRenderer.on('gbif:download',     (_e, d) => cb(d)),
     onEnumProgress:(cb) => ipcRenderer.on('gbif:enumProgress', (_e, d) => cb(d)),
+    // --- bulk download jobs (DWCA archive + DOI + resumable image queue) ---
+    acquireSearch: invoke('gbif:acquireSearch'), // (searchUrl) -> { key, doi, slug }
+    cancelJob:     invoke('gbif:cancelJob'),      // (key)
+    resumeJob:     invoke('gbif:resumeJob'),      // (key)
+    listJobs:      invoke('gbif:listJobs'),       // () -> [rows+counts]
+    nextBlocked:   invoke('gbif:nextBlocked'),    // (key, limit) -> [{gbif_id,image_url}]
+    saveBlocked:   invoke('gbif:saveBlocked'),    // (key, gbifId, dataUrl)
+    failBlocked:   invoke('gbif:failBlocked'),    // (key, gbifId, err)
+    onJobProgress: (cb) => ipcRenderer.on('gbif:jobProgress', (_e, d) => cb(d)),
+    onJobsActive:  (cb) => ipcRenderer.on('gbif:jobsActive',  (_e, d) => cb(d)),
+  },
+  auth: {
+    status:   invoke('auth:status'),   // () -> { available, method, username }
+    setToken: invoke('auth:setToken'), // (jwt) -> status
+    verify:   invoke('auth:verify'),   // () -> { ok, username? }
+    clear:    invoke('auth:clear'),    // () -> status
   },
   viewer: {
     dbSchema:        invoke('viewer:dbSchema'),        // () -> { table, columns, rowCount }

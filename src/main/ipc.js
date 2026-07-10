@@ -18,6 +18,9 @@ const db = require('../server/db');
 const api = require('../server/gbif-api');
 const downloadService = require('../server/download-service');
 const viewer = require('../server/viewer');
+const downloadJobs = require('./download-jobs');
+const authProvider = require('./auth');
+const gbifDownloadApi = require('../server/gbif-download-api');
 
 function dbFileFor(parentDir) {
   return parentDir ? path.join(paths.resolvePaths(parentDir).db, 'images.db') : null;
@@ -132,6 +135,39 @@ function register(win) {
     return true;
   });
 
+  // --- GBIF bulk download jobs (DWCA archive + DOI + resumable image queue) ---
+  ipcMain.handle('gbif:acquireSearch', (_e, searchUrl) => downloadJobs.submit(searchUrl));
+  ipcMain.handle('gbif:cancelJob', (_e, key) => downloadJobs.cancel(key));
+  ipcMain.handle('gbif:resumeJob', (_e, key) => downloadJobs.resume(key));
+  ipcMain.handle('gbif:listJobs', () => downloadJobs.listActive());
+  ipcMain.handle('gbif:nextBlocked', (_e, key, limit) => {
+    const pd = settings.getParentDir();
+    return pd ? downloadJobs.nextBlocked(pd, key, limit) : [];
+  });
+  ipcMain.handle('gbif:saveBlocked', async (_e, key, gbifId, dataUrl) => {
+    const pd = settings.getParentDir();
+    if (!pd) return { ok: false };
+    const buf = decodeImage(dataUrl);
+    if (!buf || !buf.length) { downloadJobs.failBlocked(pd, key, gbifId, 'no image bytes'); return { ok: false }; }
+    await downloadJobs.saveBlocked(pd, key, gbifId, buf);
+    return { ok: true };
+  });
+  ipcMain.handle('gbif:failBlocked', (_e, key, gbifId, err) => {
+    const pd = settings.getParentDir();
+    if (pd) downloadJobs.failBlocked(pd, key, gbifId, err);
+    return true;
+  });
+
+  // --- GBIF auth (webview JWT preferred; .env Basic fallback) -------------
+  ipcMain.handle('auth:status', async () => { await authProvider.scanCookies(); return authProvider.status(); });
+  ipcMain.handle('auth:setToken', (_e, token) => authProvider.setWebviewToken(token));
+  ipcMain.handle('auth:clear', () => authProvider.clearWebviewToken());
+  ipcMain.handle('auth:verify', async () => {
+    const a = authProvider.getAuth();
+    if (!a) return { ok: false, reason: 'no-credentials' };
+    try { return await gbifDownloadApi.verifyAuth(a); } catch (e) { return { ok: false, error: e.message }; }
+  });
+
   // --- saved-search bookmarks (app-wide, per domain) ---------------------
   ipcMain.handle('bookmarks:list', (_e, domain) => bookmarks.list(domain));
   ipcMain.handle('bookmarks:add', (_e, domain, url, label) => bookmarks.add(domain, url, label));
@@ -159,7 +195,7 @@ function register(win) {
     return viewer.listDwc(paths.resolvePaths(pd).dwc);
   });
 
-  ipcMain.handle('viewer:dwcRows', (_e, slug, file, opts) => {
+  ipcMain.handle('viewer:dwcRows', async (_e, slug, file, opts) => {
     const pd = settings.getParentDir();
     if (!pd) return { columns: [], rows: [], total: 0, limit: 100, offset: 0 };
     return viewer.readDwcCsv(paths.resolvePaths(pd).dwc, slug, file, opts || {});

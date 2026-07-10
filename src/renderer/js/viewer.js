@@ -19,7 +19,7 @@
     src: 'db', folder: null, file: 'occurrence.csv', search: '',
     page: 0, pageSize: 100, total: 0,
     parentReady: false, mounted: false, imgToken: 0,
-    rows: [], selectedIndex: -1,
+    rows: [], selectedIndex: -1, folders: [],
   };
   const els = {};
   let searchTimer = null;
@@ -299,6 +299,7 @@
     els.folder.hidden = false; els.file.hidden = false;
     if (reloadFolders) {
       const folders = await api.viewer.listDwc();
+      state.folders = folders;
       if (!folders.length) {
         els.folder.innerHTML = '<option>— none —</option>';
         renderEmpty('— no Darwin Core folders yet —'); clearJson(); clearImage();
@@ -307,13 +308,25 @@
       }
       els.folder.innerHTML = folders.map((f) => {
         const n = (f.meta && f.meta.count != null) ? ` (${f.meta.count})` : '';
-        return `<option value="${esc(f.slug)}">${esc(f.slug)}${n}</option>`;
+        const doi = (f.meta && f.meta.doi) ? ' ★' : ''; // ★ = has a GBIF download DOI
+        return `<option value="${esc(f.slug)}">${esc(f.slug)}${n}${doi}</option>`;
       }).join('');
       if (state.folder && folders.some((f) => f.slug === state.folder)) els.folder.value = state.folder;
       else { state.folder = folders[0].slug; els.folder.value = state.folder; }
     }
     if (!state.folder) return;
+    updateFileOptions();
     await loadDwcRows();
+  }
+
+  // Populate the file dropdown from the selected folder's actual files (a quick
+  // search has occurrence.csv; a full download has GBIF's occurrence.txt etc.).
+  function updateFileOptions() {
+    const folder = state.folders.find((f) => f.slug === state.folder);
+    const files = (folder && folder.files && folder.files.length) ? folder.files : ['occurrence.csv'];
+    els.file.innerHTML = files.map((f) => `<option value="${esc(f)}">${esc(f)}</option>`).join('');
+    if (!files.includes(state.file)) state.file = files[0];
+    els.file.value = state.file;
   }
   async function loadDwcRows() {
     const res = await api.viewer.dwcRows(state.folder, state.file, { limit: state.pageSize, offset: state.page * state.pageSize, search: state.search });
@@ -376,7 +389,7 @@
     els.imgCap = document.getElementById('vw-image-cap');
 
     els.srcBtns.forEach((b) => b.addEventListener('click', () => setSource(b.dataset.src)));
-    els.folder.addEventListener('change', () => { state.folder = els.folder.value; state.page = 0; loadDwcRows(); });
+    els.folder.addEventListener('change', () => { state.folder = els.folder.value; state.page = 0; updateFileOptions(); loadDwcRows(); });
     els.file.addEventListener('change', () => { state.file = els.file.value; state.page = 0; loadDwcRows(); });
     els.search.addEventListener('input', () => {
       clearTimeout(searchTimer);

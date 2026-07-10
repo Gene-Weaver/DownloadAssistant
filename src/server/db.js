@@ -38,6 +38,44 @@ CREATE TABLE IF NOT EXISTS images (
 );
 CREATE INDEX IF NOT EXISTS idx_images_fullname ON images(fullname);
 CREATE INDEX IF NOT EXISTS idx_images_family   ON images(family);
+
+-- One row per GBIF occurrence-download job (the async DWCA export). Carries the
+-- citable DOI and is the durable resume token for a background job.
+CREATE TABLE IF NOT EXISTS downloads (
+  key            TEXT PRIMARY KEY,   -- GBIF download key, e.g. 0064539-230530130749713
+  slug           TEXT,               -- dwc/{slug} folder
+  doi            TEXT,               -- 10.15468/dl.xxxxxx (present from PREPARING)
+  source_url     TEXT,               -- the gbif.org search URL
+  predicate_json TEXT,               -- the predicate we POSTed (audit/replay)
+  format         TEXT DEFAULT 'DWCA',
+  status         TEXT NOT NULL,      -- GBIF status + local phases (DOWNLOADING_ZIP/PARSING/QUEUED/DONE)
+  total_records  INTEGER,
+  num_datasets   INTEGER,
+  size_bytes     INTEGER,
+  license        TEXT,
+  citation       TEXT,
+  download_link  TEXT,
+  archive_path   TEXT,
+  error          TEXT,
+  requested_at   TEXT NOT NULL DEFAULT (datetime('now')),
+  polled_at      TEXT,
+  completed_at   TEXT
+);
+
+-- Resumable per-image work queue for a download (survives app restart).
+CREATE TABLE IF NOT EXISTS download_queue (
+  gbif_id      TEXT PRIMARY KEY,
+  download_key TEXT,
+  image_url    TEXT,
+  host         TEXT,               -- registrable-ish host, for per-host throttling
+  occ_json     TEXT,               -- compact occurrence metadata (built from occurrence.txt)
+  status       TEXT NOT NULL DEFAULT 'pending', -- pending|in_progress|blocked|done|failed|skipped
+  attempts     INTEGER NOT NULL DEFAULT 0,
+  last_error   TEXT,
+  updated_at   TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_dlq_status ON download_queue(status, host);
+CREATE INDEX IF NOT EXISTS idx_dlq_key    ON download_queue(download_key);
 `;
 
 // Additive migrations for DBs created by an earlier version (CREATE TABLE IF NOT
@@ -138,6 +176,110 @@ function getRow(dbFile, gbifId) {
   return db.prepare('SELECT * FROM images WHERE gbif_id = ?').get(String(gbifId));
 }
 
+// --- downloads (DWCA jobs) -------------------------------------------------
+const DOWNLOAD_COLS = [
+  'key', 'slug', 'doi', 'source_url', 'predicate_json', 'format', 'status',
+  'total_records', 'num_datasets', 'size_bytes', 'license', 'citation',
+  'download_link', 'archive_path', 'error', 'requested_at', 'polled_at', 'completed_at',
+];
+
+function insertDownload(dbFile, row) {
+  const db = open(dbFile);
+  const cols = DOWNLOAD_COLS.filter((c) => row[c] !== undefined);
+  const stmt = db.prepare(`INSERT OR REPLACE INTO downloads (${cols.join(', ')}) VALUES (${cols.map((c) => `@${c}`).join(', ')})`);
+  const filled = {};
+  for (const c of cols) filled[c] = row[c] === undefined ? null : row[c];
+  stmt.run(filled);
+  return getDownload(dbFile, row.key);
+}
+
+function updateDownload(dbFile, key, patch) {
+  const db = open(dbFile);
+  const cols = Object.keys(patch).filter((c) => DOWNLOAD_COLS.includes(c));
+  if (!cols.length) return getDownload(dbFile, key);
+  db.prepare(`UPDATE downloads SET ${cols.map((c) => `${c} = @${c}`).join(', ')} WHERE key = @key`)
+    .run({ ...patch, key });
+  return getDownload(dbFile, key);
+}
+
+function getDownload(dbFile, key) {
+  return open(dbFile).prepare('SELECT * FROM downloads WHERE key = ?').get(String(key));
+}
+
+function listDownloads(dbFile) {
+  return open(dbFile).prepare('SELECT * FROM downloads ORDER BY requested_at DESC').all();
+}
+
+// Downloads not in a terminal local/GBIF state — resumed on startup.
+const TERMINAL = ['DONE', 'FAILED', 'KILLED', 'CANCELLED', 'FILE_ERASED'];
+function getActiveDownloads(dbFile) {
+  const q = `SELECT * FROM downloads WHERE status NOT IN (${TERMINAL.map(() => '?').join(',')})`;
+  return open(dbFile).prepare(q).all(...TERMINAL);
+}
+
+// --- download_queue (per-image work) --------------------------------------
+function enqueue(dbFile, rows) {
+  const db = open(dbFile);
+  const stmt = db.prepare(`INSERT OR IGNORE INTO download_queue
+    (gbif_id, download_key, image_url, host, occ_json, status, updated_at)
+    VALUES (@gbif_id, @download_key, @image_url, @host, @occ_json, 'pending', datetime('now'))`);
+  const tx = db.transaction((batch) => { for (const r of batch) stmt.run(r); });
+  tx(rows);
+  return rows.length;
+}
+
+// Mark queue rows whose gbif_id is already in images (idempotent restart / dedup).
+function markSkippedAlreadyDownloaded(dbFile, key) {
+  return open(dbFile).prepare(
+    `UPDATE download_queue SET status='skipped', updated_at=datetime('now')
+     WHERE download_key = ? AND status='pending' AND gbif_id IN (SELECT gbif_id FROM images)`
+  ).run(String(key)).changes;
+}
+
+function nextQueueBatch(dbFile, { key, status = 'pending', limit = 500 } = {}) {
+  const db = open(dbFile);
+  const args = [status];
+  let where = 'status = ?';
+  if (key) { where += ' AND download_key = ?'; args.push(String(key)); }
+  return db.prepare(`SELECT * FROM download_queue WHERE ${where} ORDER BY host, gbif_id LIMIT ?`).all(...args, limit);
+}
+
+function setQueueStatus(dbFile, gbifId, status, err) {
+  return open(dbFile).prepare(
+    `UPDATE download_queue SET status=@status, last_error=@err, updated_at=datetime('now') WHERE gbif_id=@id`
+  ).run({ id: String(gbifId), status, err: err || null }).changes;
+}
+
+function bumpQueueAttempt(dbFile, gbifId, err, maxAttempts = 4) {
+  const db = open(dbFile);
+  db.prepare(
+    `UPDATE download_queue SET attempts = attempts + 1, last_error = @err,
+       status = CASE WHEN attempts + 1 >= @max THEN 'failed' ELSE 'pending' END,
+       updated_at = datetime('now')
+     WHERE gbif_id = @id`
+  ).run({ id: String(gbifId), err: err || null, max: maxAttempts });
+}
+
+function queueCounts(dbFile, key) {
+  const db = open(dbFile);
+  const args = key ? [String(key)] : [];
+  const where = key ? 'WHERE download_key = ?' : '';
+  const rows = db.prepare(`SELECT status, COUNT(*) AS n FROM download_queue ${where} GROUP BY status`).all(...args);
+  const out = { pending: 0, in_progress: 0, blocked: 0, done: 0, failed: 0, skipped: 0, total: 0 };
+  for (const r of rows) { out[r.status] = r.n; out.total += r.n; }
+  return out;
+}
+
+// On restart, any in_progress row was interrupted — requeue it.
+function resetInProgress(dbFile) {
+  return open(dbFile).prepare(
+    "UPDATE download_queue SET status='pending', updated_at=datetime('now') WHERE status='in_progress'"
+  ).run().changes;
+}
+
 module.exports = {
   open, hasImage, listDownloadedIds, upsertImage, count, schema, rows, getRow,
+  insertDownload, updateDownload, getDownload, listDownloads, getActiveDownloads,
+  enqueue, markSkippedAlreadyDownloaded, nextQueueBatch, setQueueStatus,
+  bumpQueueAttempt, queueCounts, resetInProgress,
 };

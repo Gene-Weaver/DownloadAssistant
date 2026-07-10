@@ -74,6 +74,38 @@ overrides.
   `userData/bookmarks.json`), so when more source tabs are added each site keeps
   its own list.
 
+## Full download — every image + a DOI (past the offset wall)
+
+The GBIF occurrence-search API can't page past ~10k–100k records, so **ACQUIRE
+SEARCH**, when you're signed in, uses GBIF's **occurrence-download API** instead:
+
+1. Your search is translated to a download **predicate** (the CoL-XR
+   `checklistKey` is handled, so alphanumeric taxon keys resolve).
+2. GBIF builds a **Darwin Core Archive** of *every* matching record (millions if
+   need be) and assigns it a **DOI** — stored in a new `downloads` table.
+3. The archive's real `occurrence.txt` / `multimedia.txt` land in `dwc/{slug}/`,
+   and every `(gbifID → image URL)` is queued in a **resumable** `download_queue`.
+4. Images download **tiered**: a headless full-res fetch first (works for most
+   hosts — Symbiota, etc.), falling back to the webview only for hosts that
+   bot-block. The queue survives app restarts and skips anything already saved.
+
+The whole job runs in the background (poll → download → parse → images) with a
+progress card, and resumes on relaunch via the stored download key.
+
+### GBIF login (required for the full download)
+
+The download API needs your GBIF account via **HTTP Basic auth** — a browser
+login is **not** enough (GBIF's website token is rejected by `api.gbif.org`).
+Copy `.env.example` to **`.env`** (gitignored, never committed) and set:
+
+```
+GBIF_USER=your_gbif_username   # your USERNAME, not your email
+GBIF_PASS=your_gbif_password
+GBIF_EMAIL=you@example.org
+```
+
+Without credentials, ACQUIRE SEARCH falls back to the quick (capped) offset path.
+
 ## Viewer tab
 
 Browse everything under the current `parent_dir` without leaving the app:

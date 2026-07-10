@@ -21,7 +21,7 @@ const { pickImageUrl } = require('./gbif-api');
 
 const OCC_WEB = 'https://www.gbif.org/occurrence';
 
-async function saveOne({ parentDir, occ, publisher, imageBuffer }) {
+async function saveOne({ parentDir, occ, publisher, imageBuffer, imageUrl }) {
   const paths = ensurePaths(parentDir);
   const dbFile = path.join(paths.db, 'images.db');
 
@@ -57,7 +57,7 @@ async function saveOne({ parentDir, occ, publisher, imageBuffer }) {
     img_y: prepared.height,
     megapixels: prepared.megapixels,
     occurrence_url: `${OCC_WEB}/${gbifId}`,
-    image_url: pickImageUrl(occ),
+    image_url: imageUrl || pickImageUrl(occ), // bulk path passes the URL from multimedia.txt
     source: 'gbif',
     downloaded_at: new Date().toISOString(),
   };
